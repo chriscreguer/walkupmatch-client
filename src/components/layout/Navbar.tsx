@@ -1,16 +1,31 @@
-import { signOut } from 'next-auth/react';
+'use client';
+
+import { useSpotifyAuth } from '@/lib/auth/authUtils';
+import Link from 'next/link';
+import { FaSignOutAlt } from 'react-icons/fa';
 
 export default function Navbar() {
+  const { logout } = useSpotifyAuth();
+
   return (
-    <header className="bg-gray-800 py-4">
-      <div className="container mx-auto px-4 flex justify-between items-center">
-        <h1 className="text-white text-xl font-bold">MLB Music Match</h1>
-        <button 
-          onClick={() => signOut({ callbackUrl: '/' })}
-          className="text-white text-sm hover:underline"
-        >
-          Sign Out
-        </button>
+    <header className="bg-gray-800 text-white">
+      <div className="container mx-auto px-4 py-3 flex justify-between items-center">
+        <div className="flex items-center">
+          <Link href="/" className="font-bold text-xl">
+            WalkUp Match
+          </Link>
+        </div>
+        
+        <nav>
+          <button 
+            onClick={logout}
+            className="flex items-center text-sm text-white hover:text-gray-300 transition"
+            aria-label="Sign out"
+          >
+            <FaSignOutAlt className="mr-1" />
+            <span className="hidden sm:inline">Sign Out</span>
+          </button>
+        </nav>
       </div>
     </header>
   );

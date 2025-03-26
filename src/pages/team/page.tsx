@@ -7,6 +7,7 @@ import { TeamProfile } from '@/components/team/TeamProfile';
 import BaseballDiamond from '@/components/visualization/BaseballDiamond';
 import { TeamPlaylist } from '@/components/team/TeamPlaylist';
 import { useTeam } from '@/hooks/useTeam';
+import { Team } from '@/lib/mlb/types';
 
 const TeamPage: React.FC = () => {
   const { team, loading, error, refreshTeam } = useTeam();

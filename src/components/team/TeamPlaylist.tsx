@@ -1,70 +1,143 @@
-import { MLBPlayer } from '../../lib/mlb/types';
+import React from 'react';
+import Image from 'next/image';
+import { Team, Player } from '@/lib/mlb/types';
 
 interface TeamPlaylistProps {
-  players: MLBPlayer[];
+  team: Team | null;
+  loading?: boolean;
 }
 
-export default function TeamPlaylist({ players }: TeamPlaylistProps) {
-  // Filter players that have walkup songs
-  const playersWithSongs = players.filter(player => player.walkupSong);
-  
+// Helper to find a player by ID
+const findPlayerById = (players: Player[], id: string): Player | undefined => {
+  return players.find(player => player.id === id);
+};
+
+// Helper to render match strength as dots
+const MatchScore = ({ score }: { score: number }) => {
   return (
-    <div className="bg-white rounded-lg p-4 shadow-sm">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-lg font-bold">Team Playlist</h2>
-        <button className="text-sm text-green-600 font-semibold hover:underline">
+    <div className="flex gap-1">
+      {[1, 2, 3].map((i) => (
+        <div 
+          key={i}
+          className={`w-2 h-2 rounded-full ${i <= score ? 'bg-green-500' : 'bg-gray-200'}`}
+        />
+      ))}
+    </div>
+  );
+};
+
+export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
+  if (loading) {
+    return (
+      <div className="w-full mt-6">
+        <div className="flex justify-between items-center mb-2">
+          <h3 className="font-bold text-base text-black">Team Playlist</h3>
+          <button className="text-sm text-gray-600 opacity-50" disabled>Open in Spotify</button>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+          <div className="animate-pulse p-4 space-y-4">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="flex space-x-4">
+                <div className="rounded bg-gray-200 h-14 w-14"></div>
+                <div className="flex-1 space-y-2 py-1">
+                  <div className="h-3 bg-gray-200 rounded w-3/4"></div>
+                  <div className="h-2 bg-gray-200 rounded w-1/2"></div>
+                </div>
+                <div className="w-16">
+                  <div className="h-3 bg-gray-200 rounded"></div>
+                </div>
+                <div className="w-16">
+                  <div className="h-2 bg-gray-200 rounded"></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!team || !team.songs || team.songs.length === 0) {
+    return (
+      <div className="w-full mt-6">
+        <div className="flex justify-between items-center mb-2">
+          <h3 className="font-bold text-base text-black">Team Playlist</h3>
+          <button className="text-sm text-gray-600 opacity-50" disabled>Open in Spotify</button>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm p-4">
+          <p className="text-gray-500 text-center py-4">
+            No songs available for this team yet.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full mt-6">
+      <div className="flex justify-between items-center mb-2">
+        <h3 className="font-bold text-base text-black">Team Playlist</h3>
+        <button className="text-sm text-blue-600 hover:text-blue-800">
           Open in Spotify
         </button>
       </div>
       
       {/* Table Header */}
-      <div className="grid grid-cols-12 py-2 border-b border-black/10">
-        <div className="col-span-6">
-          <span className="text-xs font-bold uppercase text-black/70">Song</span>
+      <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+        <div className="p-3 border-b border-gray-100">
+          <div className="flex text-xs font-bold text-black text-opacity-70 uppercase">
+            <div className="flex-1">Song</div>
+            <div className="w-32">Player</div>
+            <div className="w-16 text-center">Match</div>
+          </div>
         </div>
-        <div className="col-span-4">
-          <span className="text-xs font-bold uppercase text-black/70">Player</span>
-        </div>
-        <div className="col-span-2 text-right">
-          <span className="text-xs font-bold uppercase text-black/70">Match</span>
+        
+        {/* Playlist Items */}
+        <div className="divide-y divide-gray-100">
+          {team.songs.map((song) => {
+            const player = findPlayerById(team.players, song.playerMatch);
+            
+            return (
+              <div key={song.id} className="flex p-3 items-center">
+                {/* Song Info */}
+                <div className="flex flex-1 items-center">
+                  <div className="w-14 h-14 rounded overflow-hidden mr-3">
+                    <Image 
+                      src={song.albumArt} 
+                      alt={song.name} 
+                      width={56} 
+                      height={56} 
+                      className="object-cover w-full h-full"
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-black font-medium">{song.name}</span>
+                    <span className="text-black text-opacity-70 text-sm">{song.artist}</span>
+                  </div>
+                </div>
+                
+                {/* Player Info */}
+                <div className="w-32">
+                  {player && (
+                    <div className="flex flex-col">
+                      <span className="text-black text-opacity-70 font-bold uppercase text-xs">
+                        {player.position}
+                      </span>
+                      <span className="text-black text-sm">{player.name}</span>
+                      <span className="text-black text-opacity-70 text-xs">{player.team}</span>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Match Score */}
+                <div className="w-16 flex justify-center">
+                  <MatchScore score={song.matchScore} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
-      
-      {/* Song Rows */}
-      {playersWithSongs.map((player) => (
-        <div key={player.id} className="grid grid-cols-12 py-3 border-b border-black/10 items-center">
-          {/* Song Column */}
-          <div className="col-span-6 flex items-center">
-            <div className="w-14 h-14 relative bg-gray-200 rounded">
-              {/* Album art would go here */}
-              <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-                <span>♪</span>
-              </div>
-            </div>
-            <div className="ml-3">
-              <p className="text-base font-medium">{player.walkupSong?.title}</p>
-              <p className="text-sm text-black/70">{player.walkupSong?.artist}</p>
-            </div>
-          </div>
-          
-          {/* Player Column */}
-          <div className="col-span-4">
-            <p className="text-xs font-bold uppercase text-black/70">{player.position}</p>
-            <p className="text-sm">{player.name}</p>
-            <p className="text-xs text-black/70">{player.team}</p>
-          </div>
-          
-          {/* Match Column */}
-          <div className="col-span-2 flex justify-end">
-            <div className="flex space-x-1">
-              {/* Sample match level (3 dots) */}
-              <span className="w-2 h-2 rounded-full bg-green-500"></span>
-              <span className="w-2 h-2 rounded-full bg-green-500"></span>
-              <span className="w-2 h-2 rounded-full bg-gray-300"></span>
-            </div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

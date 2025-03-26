@@ -1,62 +1,86 @@
+import React from 'react';
 import Image from 'next/image';
-import { User } from 'next-auth';
+import { useSession } from 'next-auth/react';
+import { Team } from '@/lib/mlb/types';
 
 interface TeamProfileProps {
-  userProfile: User | undefined;
-  stats: {
-    wins: number;
-    losses: number;
-    ops: number;
-    avg: number;
-    era: number;
-  };
+  team: Team | null;
+  loading?: boolean;
 }
 
-export default function TeamProfile({ userProfile, stats }: TeamProfileProps) {
-  if (!userProfile) return null;
-  
-  const firstName = userProfile.name?.split(' ')[0] || 'Your';
-  
-  return (
-    <div className="flex items-center bg-white rounded-lg p-4 shadow-sm">
-      <div className="mr-4">
-        {userProfile.image ? (
-          <Image 
-            src={userProfile.image} 
-            alt={userProfile.name || 'User'} 
-            width={64} 
-            height={64} 
-            className="rounded-full border-2 border-gray-200"
-          />
-        ) : (
-          <div className="w-16 h-16 rounded-full bg-gray-300 flex items-center justify-center">
-            <span className="text-xl text-gray-600">{firstName[0]}</span>
+export function TeamProfile({ team, loading = false }: TeamProfileProps) {
+  const { data: session } = useSession();
+  const userImage = session?.user?.image || 'https://via.placeholder.com/64';
+  const userName = session?.user?.name?.split(' ')[0] || 'User';
+
+  if (loading) {
+    return (
+      <div className="flex flex-row w-full p-4 bg-white rounded-lg shadow-sm items-center">
+        <div className="animate-pulse flex space-x-4 w-full">
+          <div className="rounded-full bg-gray-200 h-16 w-16"></div>
+          <div className="flex-1 space-y-3 py-1">
+            <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+            <div className="flex space-x-7">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="space-y-2">
+                  <div className="h-2 bg-gray-200 rounded w-12"></div>
+                  <div className="h-3 bg-gray-200 rounded w-10"></div>
+                </div>
+              ))}
+            </div>
           </div>
-        )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-row w-full p-4 bg-white rounded-lg shadow-sm items-center">
+      {/* User profile image */}
+      <div className="h-16 w-16 rounded-full overflow-hidden mr-4 border-2 border-white shadow">
+        <Image 
+          src={userImage} 
+          alt="User profile" 
+          width={64} 
+          height={64} 
+          className="object-cover w-full h-full"
+        />
       </div>
       
-      <div>
-        <h2 className="text-lg font-bold">{firstName}&apos;s Team</h2>
+      {/* Team info */}
+      <div className="flex flex-col">
+        <h2 className="font-bold text-lg text-black">
+          {team?.name || `${userName}'s Team`}
+        </h2>
         
-        <div className="flex gap-7 mt-2">
-          <div className="text-center">
-            <p className="text-xs font-bold uppercase text-black/70">W-L</p>
-            <p className="text-base font-bold">{stats.wins}-{stats.losses}</p>
+        {/* Stats */}
+        <div className="flex flex-row gap-7 mt-1">
+          <div className="flex flex-col">
+            <span className="text-black text-opacity-70 font-bold uppercase text-xs">W-L</span>
+            <span className="text-black font-bold text-base">
+              {team ? `${team.stats.wins}-${team.stats.losses}` : '0-0'}
+            </span>
           </div>
           
-          <div className="text-center">
-            <p className="text-xs font-bold uppercase text-black/70">OPS</p>
-            <p className="text-base font-bold">{stats.ops.toFixed(3)}</p>
+          <div className="flex flex-col">
+            <span className="text-black text-opacity-70 font-bold uppercase text-xs">OPS</span>
+            <span className="text-black font-bold text-base">
+              {team ? team.stats.OPS.toFixed(3) : '.000'}
+            </span>
           </div>
           
-          <div className="text-center">
-            <p className="text-xs font-bold uppercase text-black/70">AVG</p>
-            <p className="text-base font-bold">{stats.avg.toFixed(3)}</p>
+          <div className="flex flex-col">
+            <span className="text-black text-opacity-70 font-bold uppercase text-xs">AVG</span>
+            <span className="text-black font-bold text-base">
+              {team ? team.stats.AVG.toFixed(3) : '.000'}
+            </span>
           </div>
           
-          <div className="text-center">
-            <p className="text-xs font-bold uppercase text-black/70">ERA</p>
-            <p className="text-base font-bold">{stats.era.toFixed(2)}</p>
+          <div className="flex flex-col">
+            <span className="text-black text-opacity-70 font-bold uppercase text-xs">ERA</span>
+            <span className="text-black font-bold text-base">
+              {team ? team.stats.ERA.toFixed(2) : '0.00'}
+            </span>
           </div>
         </div>
       </div>
