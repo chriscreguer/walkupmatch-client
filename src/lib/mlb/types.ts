@@ -7,7 +7,10 @@ export interface Player {
   name: string;
   position: Position;
   team: string;
-  imageUrl: string;
+  headshot: string;
+  firstName: string;
+  lastName: string;
+  teamAbbreviation: string;
 }
 
 // Team statistics
@@ -27,6 +30,7 @@ export interface Song {
   albumArt: string;
   playerMatch: string;
   matchScore: number; // 0-3 representing match strength
+  matchReason: string; // e.g. "In your top songs", "Matches your genre preferences", etc.
 }
 
 // Team data structure

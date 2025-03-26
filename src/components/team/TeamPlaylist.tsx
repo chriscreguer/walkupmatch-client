@@ -12,20 +12,6 @@ const findPlayerById = (players: Player[], id: string): Player | undefined => {
   return players.find(player => player.id === id);
 };
 
-// Helper to render match strength as dots
-const MatchScore = ({ score }: { score: number }) => {
-  return (
-    <div className="flex gap-1">
-      {[1, 2, 3].map((i) => (
-        <div 
-          key={i}
-          className={`w-2 h-2 rounded-full ${i <= score ? 'bg-green-500' : 'bg-gray-200'}`}
-        />
-      ))}
-    </div>
-  );
-};
-
 export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
   if (loading) {
     return (
@@ -88,7 +74,7 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
           <div className="flex text-xs font-bold text-black text-opacity-70 uppercase">
             <div className="flex-1">Song</div>
             <div className="w-32">Player</div>
-            <div className="w-16 text-center">Match</div>
+            <div className="w-48">Match Reason</div>
           </div>
         </div>
         
@@ -129,9 +115,9 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
                   )}
                 </div>
                 
-                {/* Match Score */}
-                <div className="w-16 flex justify-center">
-                  <MatchScore score={song.matchScore} />
+                {/* Match Reason */}
+                <div className="w-48">
+                  <span className="text-sm text-green-600">{song.matchReason}</span>
                 </div>
               </div>
             );

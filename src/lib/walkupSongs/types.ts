@@ -19,6 +19,7 @@ export interface WalkupSong {
     team: string;
     teamId: string;
     walkupSong: WalkupSong;
+    matchReason?: string;
   }
   
   /**

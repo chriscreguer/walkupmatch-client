@@ -149,4 +149,22 @@ export class SpotifyService {
   async addTracksToPlaylist(playlistId: string, trackUris: string[]): Promise<void> {
     await this.spotifyApi.addTracksToPlaylist(playlistId, trackUris);
   }
+  
+  /**
+   * Get the user's saved tracks
+   */
+  async getSavedTracks(limit = 50): Promise<SpotifyTopItem[]> {
+    const response = await this.spotifyApi.getMySavedTracks({
+      limit
+    });
+    
+    return response.body.items.map(item => ({
+      id: item.track.id,
+      name: item.track.name,
+      type: 'track',
+      album: item.track.album,
+      artists: item.track.artists,
+      preview_url: item.track.preview_url
+    })) as SpotifyTopItem[];
+  }
 }

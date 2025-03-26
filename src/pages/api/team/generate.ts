@@ -25,28 +25,57 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Get user's genre preferences
     const genreSummary = await spotifyService.getUserGenres();
     
+    // Get additional Spotify data for better matching
+    const [topTracks, topArtists, savedTracks] = await Promise.all([
+      spotifyService.getTopTracks(50),
+      spotifyService.getTopArtists(50),
+      spotifyService.getSavedTracks(50)
+    ]);
+    
     // Create walkup song service
     const walkupSongService = WalkupSongFactory.createService();
     
-    // Generate team based on genre preferences
-    const matchedPlayerSongs = await walkupSongService.findTeamByGenrePreferences(
+    // Generate team based on all preferences
+    const matchedPlayerSongs = await walkupSongService.findTeamByPreferences(
       genreSummary,
+      topTracks,
+      topArtists,
+      savedTracks,
       POSITIONS
     );
     
-    // If we don't have matches for every position, we'll get an error
+    // If we don't have matches for every position, we'll still return what we have
     if (matchedPlayerSongs.length === 0) {
-      return res.status(404).json({ error: 'No matching players found' });
+      console.log('No matches found at all, returning empty team');
+      return res.status(200).json({
+        name: `${session.user?.name?.split(' ')[0]}'s Team`,
+        players: [],
+        songs: [],
+        stats: {
+          wins: 0,
+          losses: 0,
+          OPS: 0,
+          AVG: 0,
+          ERA: 0
+        }
+      });
     }
     
     // Convert to Player objects for our app structure
-    const selectedPlayers: Player[] = matchedPlayerSongs.map(playerSong => ({
-      id: playerSong.playerId,
-      name: playerSong.playerName,
-      position: playerSong.position as Position,
-      team: playerSong.team,
-      imageUrl: `https://via.placeholder.com/32?text=${playerSong.playerName.substring(0, 1)}`
-    }));
+    const selectedPlayers: Player[] = matchedPlayerSongs.map(playerSong => {
+      const [firstName, ...lastNameParts] = playerSong.playerName.split(' ');
+      const lastName = lastNameParts.join(' ');
+      return {
+        id: playerSong.playerId,
+        name: playerSong.playerName,
+        position: playerSong.position as Position,
+        team: playerSong.team,
+        headshot: `https://via.placeholder.com/32?text=${firstName.substring(0, 1)}`,
+        firstName,
+        lastName,
+        teamAbbreviation: playerSong.teamId
+      };
+    });
     
     // Create song objects for the team
     const selectedSongs = matchedPlayerSongs.map(playerSong => ({
@@ -57,7 +86,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         ? `https://i.scdn.co/image/${playerSong.walkupSong.spotifyId}`
         : 'https://via.placeholder.com/56',
       playerMatch: playerSong.playerId,
-      matchScore: 3 // For now, hardcoded strong match
+      matchScore: 3, // For now, hardcoded strong match
+      matchReason: playerSong.matchReason || 'Based on your music taste'
     }));
     
     // Separate players by position type
