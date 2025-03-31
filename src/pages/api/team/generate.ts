@@ -2,7 +2,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from 'next-auth/react';
 import { SpotifyService } from '@/services/spotify/spotifyService';
 import { WalkupSongFactory } from '@/services/walkupSongs/walkupSongFactory';
-import { Player, Position, Team } from '@/lib/mlb/types';
+import { Player, Position, Team, Song } from '@/lib/mlb/types';
 import { calculateTeamStats } from '@/services/mlb/statsCalculator';
 
 // List of positions to fill
@@ -27,8 +27,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     
     // Get additional Spotify data for better matching
     const [topTracks, topArtists, savedTracks] = await Promise.all([
-      spotifyService.getTopTracks(50),
-      spotifyService.getTopArtists(50),
+      spotifyService.getAllTopTracks(),
+      spotifyService.getAllTopArtists(),
       spotifyService.getSavedTracks(50)
     ]);
     
@@ -77,17 +77,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       };
     });
     
-    // Create song objects for the team
-    const selectedSongs = matchedPlayerSongs.map(playerSong => ({
-      id: playerSong.walkupSong.id,
-      name: playerSong.walkupSong.songName,
-      artist: playerSong.walkupSong.artistName,
-      albumArt: playerSong.walkupSong.spotifyId 
-        ? `https://i.scdn.co/image/${playerSong.walkupSong.spotifyId}`
-        : 'https://via.placeholder.com/56',
-      playerMatch: playerSong.playerId,
-      matchScore: 3, // For now, hardcoded strong match
-      matchReason: playerSong.matchReason || 'Based on your music taste'
+    // Convert to Song objects for our app structure
+    const songs = await Promise.all(matchedPlayerSongs.map(async playerSong => {
+      let albumArt = spotifyService.getDefaultAlbumArt();
+      
+      // Search for the song on Spotify
+      const spotifyTrack = await spotifyService.searchTrack(
+        playerSong.walkupSong.songName,
+        playerSong.walkupSong.artistName
+      );
+      
+      if (spotifyTrack?.album?.images) {
+        albumArt = spotifyService.getBestAlbumArtUrl(spotifyTrack.album.images);
+      }
+      
+      return {
+        id: playerSong.walkupSong.id,
+        name: playerSong.walkupSong.songName,
+        artist: playerSong.walkupSong.artistName,
+        albumArt,
+        playerMatch: playerSong.playerId,
+        matchScore: 1,
+        matchReason: playerSong.matchReason || 'Based on your music taste',
+        rankInfo: playerSong.rankInfo,
+        previewUrl: spotifyTrack?.preview_url
+      };
     }));
     
     // Separate players by position type
@@ -101,7 +115,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const team: Team = {
       name: `${session.user?.name?.split(' ')[0]}'s Team`,
       players: selectedPlayers,
-      songs: selectedSongs,
+      songs: songs,
       stats
     };
     

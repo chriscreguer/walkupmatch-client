@@ -15,7 +15,7 @@ export function TeamProfile({ team, loading = false }: TeamProfileProps) {
 
   if (loading) {
     return (
-      <div className="flex flex-row w-full p-4 bg-white rounded-lg shadow-sm items-center">
+      <div className="flex flex-row w-full items-center">
         <div className="animate-pulse flex space-x-4 w-full">
           <div className="rounded-full bg-gray-200 h-16 w-16"></div>
           <div className="flex-1 space-y-3 py-1">
@@ -35,15 +35,15 @@ export function TeamProfile({ team, loading = false }: TeamProfileProps) {
   }
 
   return (
-    <div className="flex flex-row w-full p-4 bg-white rounded-lg shadow-sm items-center">
+    <div className="flex flex-row w-full items-center">
       {/* User profile image */}
-      <div className="h-16 w-16 rounded-full overflow-hidden mr-4 border-2 border-white shadow">
+      <div className="relative h-[72px] w-[72px] rounded-full overflow-hidden mr-4">
         <Image 
           src={userImage} 
           alt="User profile" 
-          width={64} 
-          height={64} 
-          className="object-cover w-full h-full"
+          fill
+          className="object-cover"
+          sizes="72px"
         />
       </div>
       

@@ -10,6 +10,7 @@ export interface WalkupSong {
     spotifyId?: string;
     youtubeId?: string;
     genre: string[];
+    albumArt?: string;
   }
   
   export interface PlayerWalkupSong {
@@ -20,6 +21,8 @@ export interface WalkupSong {
     teamId: string;
     walkupSong: WalkupSong;
     matchReason?: string;
+    rankInfo?: string;
+    matchScore?: number;
   }
   
   /**

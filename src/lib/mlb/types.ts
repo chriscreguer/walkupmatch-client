@@ -31,6 +31,8 @@ export interface Song {
   playerMatch: string;
   matchScore: number; // 0-3 representing match strength
   matchReason: string; // e.g. "In your top songs", "Matches your genre preferences", etc.
+  rankInfo?: string; // e.g. "#4 in your top tracks"
+  previewUrl?: string; // Spotify preview URL for 30-second sample
 }
 
 // Team data structure

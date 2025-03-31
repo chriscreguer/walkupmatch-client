@@ -9,13 +9,19 @@ export interface SpotifyUserProfile {
   followers: { total: number };
 }
 
+export interface SpotifyImage {
+  url: string;
+  height?: number;
+  width?: number;
+}
+
 export interface SpotifyTopItem {
   id: string;
   name: string;
   type: 'track' | 'artist';
-  images?: Array<{ url: string }>;
+  images?: SpotifyImage[];
   album?: {
-    images: Array<{ url: string }>;
+    images: SpotifyImage[];
   };
   artists?: Array<{
     id: string;
@@ -166,5 +172,117 @@ export class SpotifyService {
       artists: item.track.artists,
       preview_url: item.track.preview_url
     })) as SpotifyTopItem[];
+  }
+  
+  /**
+   * Get track details from Spotify
+   */
+  async getTrackDetails(trackId: string): Promise<SpotifyTopItem | null> {
+    try {
+      const response = await this.spotifyApi.getTrack(trackId);
+      return {
+        id: response.body.id,
+        name: response.body.name,
+        type: 'track',
+        album: response.body.album,
+        artists: response.body.artists,
+        preview_url: response.body.preview_url
+      };
+    } catch (error) {
+      console.error('Error fetching track details:', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Search for a track on Spotify
+   */
+  async searchTrack(songName: string, artistName: string): Promise<SpotifyTopItem | null> {
+    try {
+      const query = `${songName} artist:${artistName}`;
+      const response = await this.spotifyApi.searchTracks(query, { limit: 1 });
+      
+      if (response.body.tracks && response.body.tracks.items?.length > 0) {
+        const track = response.body.tracks.items[0];
+        return {
+          id: track.id,
+          name: track.name,
+          type: 'track',
+          album: track.album,
+          artists: track.artists,
+          preview_url: track.preview_url
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error('Error searching track:', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Get a default album art URL
+   */
+  getDefaultAlbumArt(): string {
+    return 'https://i.scdn.co/image/ab67616d00001e02ff9ca10b55ce82ae553c8228';
+  }
+
+  /**
+   * Get the best available album art URL from an array of images
+   */
+  getBestAlbumArtUrl(images: SpotifyImage[]): string {
+    if (!images || images.length === 0) {
+      return this.getDefaultAlbumArt();
+    }
+    
+    // Try to find a 300x300 image first
+    const mediumImage = images.find(img => img.height === 300 && img.width === 300);
+    if (mediumImage) {
+      return mediumImage.url;
+    }
+    
+    // Fall back to the first image if no 300x300 is found
+    return images[0].url;
+  }
+
+  /**
+   * Get user's top tracks across all time frames
+   */
+  async getAllTopTracks(): Promise<{ short_term: SpotifyTopItem[], medium_term: SpotifyTopItem[], long_term: SpotifyTopItem[] }> {
+    const [short_term, medium_term, long_term] = await Promise.all([
+      this.getTopTracks(50, 'short_term'),
+      this.getTopTracks(50, 'medium_term'),
+      this.getTopTracks(50, 'long_term')
+    ]);
+    return { short_term, medium_term, long_term };
+  }
+
+  /**
+   * Get user's top artists across all time frames
+   */
+  async getAllTopArtists(): Promise<{ short_term: SpotifyTopItem[], medium_term: SpotifyTopItem[], long_term: SpotifyTopItem[] }> {
+    const [short_term, medium_term, long_term] = await Promise.all([
+      this.getTopArtists(50, 'short_term'),
+      this.getTopArtists(50, 'medium_term'),
+      this.getTopArtists(50, 'long_term')
+    ]);
+    return { short_term, medium_term, long_term };
+  }
+
+  /**
+   * Get user's saved tracks
+   */
+  async getSavedTracks(limit: number = 50): Promise<SpotifyTopItem[]> {
+    const response = await this.spotifyApi.getMySavedTracks({
+      limit
+    });
+    return response.body.items.map((item: any) => ({
+      id: item.track.id,
+      name: item.track.name,
+      type: 'track',
+      album: item.track.album,
+      artists: item.track.artists,
+      preview_url: item.track.preview_url
+    }));
   }
 }

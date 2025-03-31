@@ -20,7 +20,7 @@ const TeamPage: React.FC = () => {
 
       <Navbar />
       
-      <main className="container mx-auto px-4 py-6 max-w-4xl">
+      <main className="container mx-auto py-6 max-w-4xl">
         {/* Error message */}
         {error && (
           <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-4 rounded">
@@ -38,7 +38,7 @@ const TeamPage: React.FC = () => {
         <TeamProfile team={team} loading={loading} />
         
         {/* Baseball Diamond Visualization */}
-        <div className="mt-6 bg-[#E4E8E3] bg-opacity-70 p-4 rounded-lg shadow-sm">
+        <div className="mt-6 bg-[#E4E8E3] bg-opacity-70 p-2 rounded-lg shadow-sm">
           <BaseballDiamond players={team?.players || []} />
         </div>
         

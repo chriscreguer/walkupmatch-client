@@ -28,14 +28,14 @@ export default function LandingPage() {
             alt="WalkUp Match App Preview"
             width={500}
             height={400}
-            className="w-full h-auto rounded-lg shadow-lg"
+            className="w-full h-auto rounded-lg"
             priority
           />
         </div>
       </div>
 
       {/* CTA Section (Bottom) */}
-      <div className="w-full bg-white py-10 px-6 rounded-t-3xl shadow-lg">
+      <div className="w-full bg-white py-10 px-6 rounded-t-3xl ">
         <div className="max-w-md mx-auto">
           {/* Headline */}
           <h1 className="font-dm-sans text-3xl font-bold text-black mb-3">
@@ -50,7 +50,7 @@ export default function LandingPage() {
           {/* Login Button */}
           <button
             onClick={loginWithSpotify}
-            className="flex items-center justify-center w-full bg-[#1DB954] text-white font-medium py-3 px-6 rounded-full shadow-md hover:bg-opacity-90 transition duration-200"
+            className="flex items-center justify-center w-full bg-[#1DB954] text-white font-medium py-3 px-6 rounded-full hover:bg-opacity-90 transition duration-200"
           >
             <FaSpotify className="mr-2 text-xl" />
             Login with Spotify
