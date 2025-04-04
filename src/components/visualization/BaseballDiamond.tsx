@@ -8,21 +8,21 @@ interface BaseballDiamondProps {
 
 // Positions based on standard baseball field positioning
 const POSITIONS: Record<string, { x: number, y: number, anchor: 'left' | 'center' | 'right' }> = {
-  'SP': { x: 234, y: 130, anchor: 'center' },   // Pitcher's mound (center of infield)
-  'C': { x: 234, y: 210, anchor: 'center' },    // Catcher (behind home plate)
-  '1B': { x: 440, y: 130, anchor: 'right' },    // First baseman (near first base)
-  '2B': { x: 350, y: 90, anchor: 'right' },    // Second baseman (right of second base)
-  '3B': { x: 20, y: 120, anchor: 'left' },     // Third baseman (near third base)
-  'SS': { x: 84, y: 90, anchor: 'left' },     // Shortstop (left of second base)
-  'LF': { x: 40, y: 40, anchor: 'left' },      // Left fielder (left outfield)
-  'CF': { x: 224, y: 10, anchor: 'center' },    // Center fielder (center outfield)
-  'RF': { x: 418, y: 40, anchor: 'right' },     // Right fielder (right outfield)
-  'DH': { x: 380, y: 190, anchor: 'right' },    // Designated hitter (dugout area)
-  'RP': { x: 10, y: 160, anchor: 'left' },      // Relief pitchers (bullpen area)
-  'RP2': { x: 10, y: 180, anchor: 'left' },     // Relief pitcher 2
-  'RP3': { x: 10, y: 200, anchor: 'left' },     // Relief pitcher 3
-  'RP4': { x: 10, y: 220, anchor: 'left' },     // Relief pitcher 4
-  'RP5': { x: 10, y: 240, anchor: 'left' },     // Relief pitcher 5
+  'SP': { x: 244, y: 130, anchor: 'center' },   // Pitcher's mound (center of infield)
+  'C': { x: 254, y: 210, anchor: 'center' },    // Catcher (behind home plate)
+  '1B': { x: 460, y: 130, anchor: 'right' },    // First baseman (near first base)
+  '2B': { x: 370, y: 90, anchor: 'right' },    // Second baseman (right of second base)
+  '3B': { x: 40, y: 120, anchor: 'left' },     // Third baseman (near third base)
+  'SS': { x: 104, y: 90, anchor: 'left' },     // Shortstop (left of second base)
+  'LF': { x: 60, y: 40, anchor: 'left' },      // Left fielder (left outfield)
+  'CF': { x: 244, y: 10, anchor: 'center' },    // Center fielder (center outfield)
+  'RF': { x: 438, y: 40, anchor: 'right' },     // Right fielder (right outfield)
+  'DH': { x: 400, y: 190, anchor: 'right' },    // Designated hitter (dugout area)
+  'RP': { x: 30, y: 160, anchor: 'left' },      // Relief pitchers (bullpen area)
+  'RP2': { x: 30, y: 180, anchor: 'left' },     // Relief pitcher 2
+  'RP3': { x: 30, y: 200, anchor: 'left' },     // Relief pitcher 3
+  'RP4': { x: 30, y: 220, anchor: 'left' },     // Relief pitcher 4
+  'RP5': { x: 30, y: 240, anchor: 'left' }, 
 };
 
 // Helper to find a player by position
@@ -49,6 +49,14 @@ const BaseballDiamond: React.FC<BaseballDiamondProps> = ({ players, loading = fa
 
     setTextWidths(measurements);
   }, [players]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center">
+        <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-green-500"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full justify-center flex items-center">
@@ -100,43 +108,36 @@ const BaseballDiamond: React.FC<BaseballDiamondProps> = ({ players, loading = fa
         </g>
         
         {/* Player markers added as SVG elements */}
-        {Object.keys(POSITIONS).map(position => {
-          const player = findPlayerByPosition(players, position);
-          if (!player) return null;
-          
+      {Object.keys(POSITIONS).map(position => {
+        const player = findPlayerByPosition(players, position);
+        if (!player) return null;
+        
           const { x, y, anchor } = POSITIONS[position];
-          const width = Math.max(textWidths[position]); // Use measured width or fallback to 120
-          
-          return (
+        
+        return (
             <g key={position} transform={`translate(${x}, ${y})`}>
               {/* Player name tag with background */}
-              <g transform={`translate(${anchor === 'left' ? -5 : anchor === 'right' ? 5 : 0}, 15)`}>
-                <rect 
-                  x={anchor === 'left' ? 0 : anchor === 'right' ? -width : -width/2} 
+              <g transform={`translate(${anchor === 'left' ? 5 : anchor === 'right' ? 15 : 10}, 15)`}>
+                <foreignObject 
+                  x={anchor === 'left' ? 0 : anchor === 'right' ? -160 : -80} 
                   y={0}
-                  width={width} 
-                  height={20} 
-                  rx={3}
-                  fill="white" 
-                  stroke="#cccccc"
-                  strokeWidth={1}
-                />
-                <text 
-                  id={`text-${position}`}
-                  x={anchor === 'left' ? 5 : anchor === 'right' ? -width + 5 : -width/2 + 5} 
-                  y={14}
-                  fontSize={12}
-                  fontWeight="bold"
-                  fill="rgba(0,0,0,0.7)"
+                  width={160} 
+                  height={20}
                 >
-                  {/* <tspan fill="#555555">{position}</tspan>
-                  <tspan dx="3"> </tspan> */}
-                  <tspan>{player.name.split(' ')[0][0]}. {player.name.split(' ').slice(1).join(' ')}</tspan>
-                </text>
+                  <div className="flex items-center h-full">
+                    <div className="bg-white rounded-md px-2 py-1 border border-gray-300 shadow-sm">
+                      <div className="text-xs font-bold text-black">
+                        <span className="text-gray-600 hidden sm:inline">{position}</span>
+                        <span className="sm:hidden">{position}</span>
+                        <span className="ml-1">{player.name.split(' ')[0][0]}. {player.name.split(' ').slice(1).join(' ')}</span>
+              </div>
+            </div>
+          </div>
+                </foreignObject>
               </g>
             </g>
-          );
-        })}
+        );
+      })}
       </svg>
     </div>
   );

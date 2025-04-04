@@ -1,20 +1,435 @@
-import { PlayerWalkupSong, WalkupSongRepository } from '@/lib/walkupSongs/types';
+import axios from 'axios';
+import mongoose from 'mongoose';
+import cron from 'node-cron';
+import { PlayerWalkupSong } from '@/lib/walkupSongs/types';
 import { SpotifyGenreSummary, SpotifyTopItem } from '@/services/spotify/spotifyService';
 import { Position } from '@/lib/mlb/types';
+
+// Define MongoDB schema for player data
+const playerSchema = new mongoose.Schema({
+  id: { type: String, required: true },
+  mlbId: { type: String, required: true },
+  name: { type: String, required: true },
+  position: { type: String, required: true },
+  team: { type: String, required: true },
+  teamId: { type: String, required: true },
+  walkupSong: {
+    id: { type: String, required: true },
+    songName: { type: String, required: true },
+    artistName: { type: String, required: true },
+    albumName: String,
+    spotifyId: String,
+    youtubeId: String,
+    genre: [String],
+    albumArt: String
+  },
+  matchReason: String,
+  rankInfo: String,
+  matchScore: Number,
+  lastUpdated: { type: Date, default: Date.now }
+});
+
+// Define TypeScript interface for MongoDB document
+interface PlayerDocument extends mongoose.Document {
+  id: string;
+  mlbId: string;
+  name: string;
+  position: string;
+  team: string;
+  teamId: string;
+  walkupSong: {
+    id: string;
+    songName: string;
+    artistName: string;
+    albumName?: string;
+    spotifyId?: string;
+    youtubeId?: string;
+    genre: string[];
+    albumArt?: string;
+  };
+  matchReason?: string;
+  rankInfo?: string;
+  matchScore?: number;
+  lastUpdated: Date;
+}
+
+// Get existing model or create new one
+const Player = mongoose.models.Player || mongoose.model<PlayerDocument>('Player', playerSchema);
+
+interface APIResponse {
+  data: {
+    id: string;
+    name: string;
+    mlb_id: string;
+    position: string;
+    team: {
+      name: string;
+      id: string;
+    };
+    songs: Array<{
+      id: string;
+      title: string;
+      artists: string[];
+      spotify_image?: string;
+    }>;
+  };
+}
 
 /**
  * Service for matching user music preferences with walkup songs
  */
 export class WalkupSongService {
-  private repository: WalkupSongRepository;
+  private static instance: WalkupSongService;
+  private readonly API_BASE_URL = 'https://walkupdb.com/api';
+  private readonly RATE_LIMIT_DELAY = 1000; // 1 second delay between requests
+  private isUpdating = false;
   private readonly MIN_MATCH_SCORE = 0.1;
   private usedSongs: Set<string> = new Set();
   private usedArtists: Map<string, number> = new Map();
   
-  constructor(repository: WalkupSongRepository) {
-    this.repository = repository;
+  private constructor() {
+    // Initialize MongoDB connection
+    this.initializeMongoDB();
+    // Schedule daily updates
+    this.scheduleDailyUpdate();
   }
-  
+
+  public static getInstance(): WalkupSongService {
+    if (!WalkupSongService.instance) {
+      WalkupSongService.instance = new WalkupSongService();
+    }
+    return WalkupSongService.instance;
+  }
+
+  private async initializeMongoDB() {
+    try {
+      console.log('Attempting to connect to MongoDB...');
+      console.log('MongoDB URI:', process.env.MONGO_URI ? 'Set' : 'Not set');
+      
+      if (!process.env.MONGO_URI) {
+        throw new Error('MONGO_URI environment variable is not set');
+      }
+      
+      await mongoose.connect(process.env.MONGO_URI);
+      console.log('Connected to MongoDB successfully');
+      
+      // Verify connection
+      const db = mongoose.connection;
+      console.log('MongoDB connection state:', db.readyState);
+      console.log('MongoDB database name:', db.name);
+      
+      // Check if we can access the players collection
+      if (db.db) {
+        const collections = await db.db.listCollections().toArray();
+        console.log('Available collections:', collections.map(c => c.name));
+      } else {
+        console.log('Database object not available');
+      }
+    } catch (error) {
+      console.error('MongoDB connection error:', error);
+      if (error instanceof Error) {
+        console.error('Error details:', {
+          message: error.message,
+          stack: error.stack
+        });
+      }
+      throw error;
+    }
+  }
+
+  private scheduleDailyUpdate() {
+    // Run at 3 AM every day
+    cron.schedule('0 3 * * *', async () => {
+      console.log('Starting scheduled player data update...');
+      await this.updatePlayerData();
+    });
+  }
+
+  private async delay(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async fetchAllPlayers(): Promise<PlayerDocument[]> {
+    const allPlayers: PlayerDocument[] = [];
+    let page = 1;
+    let hasMore = true;
+    let retryCount = 0;
+    const MAX_RETRIES = 5;
+    const BASE_DELAY = 2000; // 2 seconds base delay
+
+    while (hasMore) {
+      try {
+        console.log(`Fetching page ${page}...`);
+        const response = await axios.get(`${this.API_BASE_URL}/players`, {
+          params: { page }
+        });
+
+        console.log(`Response status: ${response.status}`);
+        
+        if (response.data && response.data.data && response.data.data.length > 0) {
+          allPlayers.push(...response.data.data);
+          console.log(`Added ${response.data.data.length} players. Total: ${allPlayers.length}`);
+          
+          // Check if there's a next page
+          hasMore = response.data.links && response.data.links.next !== null;
+          page++;
+          
+          // Reset retry count on successful request
+          retryCount = 0;
+          
+          // Add delay between successful requests
+          await this.delay(this.RATE_LIMIT_DELAY);
+        } else {
+          console.log('No more players found');
+          hasMore = false;
+        }
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 429) {
+          const retryAfter = parseInt(error.response.headers['retry-after']) || 0;
+          const delay = Math.max(retryAfter * 1000, BASE_DELAY * Math.pow(2, retryCount));
+          
+          console.log(`Rate limited. Waiting ${delay/1000} seconds before retry...`);
+          await this.delay(delay);
+          
+          retryCount++;
+          if (retryCount >= MAX_RETRIES) {
+            console.error('Max retries reached. Stopping fetch.');
+            hasMore = false;
+          }
+        } else {
+          console.error(`Error fetching page ${page}:`, error);
+          if (axios.isAxiosError(error)) {
+            console.error('Error details:', {
+              status: error.response?.status,
+              statusText: error.response?.statusText,
+              data: error.response?.data
+            });
+          }
+          hasMore = false;
+        }
+      }
+    }
+
+    return allPlayers;
+  }
+
+  private async fetchPlayerDetails(playerId: string): Promise<APIResponse | null> {
+    try {
+      const response = await axios.get(`${this.API_BASE_URL}/players/${playerId}`);
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching details for player ${playerId}:`, error);
+      return null;
+    }
+  }
+
+  private async updatePlayerData() {
+    if (this.isUpdating) {
+      console.log('Update already in progress');
+      return;
+    }
+
+    this.isUpdating = true;
+    console.log('Starting player data update...');
+
+    try {
+      const players = await this.fetchAllPlayers();
+      console.log(`Found ${players.length} players to update`);
+
+      for (const player of players) {
+        const details = await this.fetchPlayerDetails(player.id);
+        if (details) {
+          await this.savePlayerToMongoDB(details);
+        }
+        await this.delay(this.RATE_LIMIT_DELAY);
+      }
+
+      console.log('Player data update completed successfully');
+    } catch (error) {
+      console.error('Error updating player data:', error);
+    } finally {
+      this.isUpdating = false;
+    }
+  }
+
+  private async savePlayerToMongoDB(player: APIResponse): Promise<void> {
+    try {
+      // Validate required fields
+      if (!player?.data?.id || !player?.data?.name || !player?.data?.mlb_id) {
+        console.log('Invalid player data:', player);
+        return;
+      }
+
+      const playerData = {
+        id: player.data.id,
+        mlbId: player.data.mlb_id,
+        name: player.data.name,
+        position: player.data.position || 'Unknown',
+        team: player.data.team?.name || 'Unknown',
+        teamId: player.data.team?.id || 'Unknown',
+        walkupSong: player.data.songs?.[0] ? {
+          id: player.data.songs[0].id,
+          songName: player.data.songs[0].title,
+          artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
+          albumName: 'Unknown',
+          spotifyId: null,
+          youtubeId: null,
+          genre: [],
+          albumArt: player.data.songs[0].spotify_image || null
+        } : {
+          id: 'no-song',
+          songName: 'No walkup song',
+          artistName: 'Unknown',
+          albumName: 'Unknown',
+          spotifyId: null,
+          youtubeId: null,
+          genre: [],
+          albumArt: null
+        },
+        lastUpdated: new Date()
+      };
+
+      console.log('Processing player:', playerData.name);
+
+      // Check if player exists
+      const existingPlayer = await Player.findOne({ id: playerData.id });
+      console.log('Existing player found:', !!existingPlayer);
+
+      if (existingPlayer) {
+        console.log('Updating existing player:', playerData.id);
+        const updateResult = await Player.updateOne(
+          { id: playerData.id },
+          { $set: playerData }
+        );
+        console.log('Update result:', updateResult);
+      } else {
+        console.log('Creating new player:', playerData.id);
+        const newPlayer = new Player(playerData);
+        await newPlayer.save();
+        console.log('Created new player:', playerData.id);
+      }
+    } catch (error) {
+      console.error('Error saving player to MongoDB:', error);
+      throw error;
+    }
+  }
+
+  public async getAllPlayers(): Promise<PlayerWalkupSong[]> {
+    try {
+      const players = await Player.find({});
+      return players.map(player => ({
+        playerId: player.id,
+        playerName: player.name,
+        position: player.position,
+        team: player.team,
+        teamId: player.teamId,
+        walkupSong: {
+          id: player.walkupSong.id,
+          songName: player.walkupSong.songName,
+          artistName: player.walkupSong.artistName,
+          albumName: player.walkupSong.albumName || '',
+          spotifyId: player.walkupSong.spotifyId || '',
+          youtubeId: player.walkupSong.youtubeId || '',
+          genre: player.walkupSong.genre || [],
+          albumArt: player.walkupSong.albumArt || ''
+        }
+      }));
+    } catch (error) {
+      console.error('Error fetching players from MongoDB:', error);
+      return [];
+    }
+  }
+
+  public async getPlayerById(playerId: string): Promise<PlayerWalkupSong | null> {
+    try {
+      const player = await Player.findOne({ id: playerId });
+      if (!player || !player.walkupSong) return null;
+
+      return {
+        playerId: player.id,
+        playerName: player.name,
+        position: player.position,
+        team: player.team,
+        teamId: player.teamId,
+        walkupSong: {
+          id: player.walkupSong.id,
+          songName: player.walkupSong.songName,
+          artistName: player.walkupSong.artistName,
+          albumName: player.walkupSong.albumName || '',
+          spotifyId: player.walkupSong.spotifyId || '',
+          youtubeId: player.walkupSong.youtubeId || '',
+          genre: player.walkupSong.genre || [],
+          albumArt: player.walkupSong.albumArt || ''
+        }
+      };
+    } catch (error) {
+      console.error(`Error fetching player ${playerId} from MongoDB:`, error);
+      return null;
+    }
+  }
+
+  public async getPlayersByTeam(teamId: string): Promise<PlayerWalkupSong[]> {
+    try {
+      const players = await Player.find({ teamId });
+      return players.map(player => {
+        if (!player.walkupSong) {
+          throw new Error(`Player ${player.id} has no walkup song data`);
+        }
+        return {
+          playerId: player.id,
+          playerName: player.name,
+          position: player.position,
+          team: player.team,
+          teamId: player.teamId,
+          walkupSong: {
+            id: player.walkupSong.id,
+            songName: player.walkupSong.songName,
+            artistName: player.walkupSong.artistName,
+            albumName: player.walkupSong.albumName || '',
+            spotifyId: player.walkupSong.spotifyId || '',
+            youtubeId: player.walkupSong.youtubeId || '',
+            genre: player.walkupSong.genre || [],
+            albumArt: player.walkupSong.albumArt || ''
+          }
+        };
+      });
+    } catch (error) {
+      console.error(`Error fetching players for team ${teamId} from MongoDB:`, error);
+      return [];
+    }
+  }
+
+  public async getPlayersByPosition(position: string): Promise<PlayerWalkupSong[]> {
+    try {
+      const players = await Player.find({ position });
+      return players.map(player => {
+        if (!player.walkupSong) {
+          throw new Error(`Player ${player.id} has no walkup song data`);
+        }
+        return {
+          playerId: player.id,
+          playerName: player.name,
+          position: player.position,
+          team: player.team,
+          teamId: player.teamId,
+          walkupSong: {
+            id: player.walkupSong.id,
+            songName: player.walkupSong.songName,
+            artistName: player.walkupSong.artistName,
+            albumName: player.walkupSong.albumName || '',
+            spotifyId: player.walkupSong.spotifyId || '',
+            youtubeId: player.walkupSong.youtubeId || '',
+            genre: player.walkupSong.genre || [],
+            albumArt: player.walkupSong.albumArt || ''
+          }
+        };
+      });
+    } catch (error) {
+      console.error(`Error fetching players for position ${position} from MongoDB:`, error);
+      return [];
+    }
+  }
+
   /**
    * Find the best player for each position based on multiple matching criteria
    */
@@ -25,7 +440,18 @@ export class WalkupSongService {
     userSavedTracks: SpotifyTopItem[],
     positions: Position[]
   ): Promise<PlayerWalkupSong[]> {
-    const allPlayerSongs = await this.repository.getAllPlayerSongs();
+    const allPlayerSongs = await this.getAllPlayers(); // Get all players from MongoDB
+    
+    // Filter out players without valid walkup songs
+    const validPlayers = allPlayerSongs.filter(player => 
+      player.walkupSong && 
+      player.walkupSong.songName && 
+      player.walkupSong.artistName &&
+      player.walkupSong.songName !== 'No walkup song'
+    );
+
+    console.log(`Found ${validPlayers.length} players with valid walkup songs out of ${allPlayerSongs.length} total players`);
+
     const team: PlayerWalkupSong[] = [];
     this.usedSongs.clear(); // Reset used songs for new team generation
     this.usedArtists.clear(); // Reset used artists for new team generation
@@ -52,193 +478,79 @@ export class WalkupSongService {
     };
     const userSaved = this.normalizeTracks(userSavedTracks);
     
-    // For each position, find the best matching player
-    for (const position of positions) {
-      // Special handling for relief pitchers
-      if (position === 'RP') {
-        // Find all relief pitchers and sort by match score
-        const reliefPitchers = allPlayerSongs.filter(p => 
-          p.position === 'RP' && !this.usedSongs.has(p.walkupSong.songName)
-        );
-        
-        if (reliefPitchers.length > 0) {
-          // Calculate match scores for each relief pitcher
-          const pitchersWithScores = reliefPitchers.map(player => {
-            const songMatch = this.findSongMatch(player.walkupSong, userTracks, userSaved);
-            const artistMatch = this.findArtistMatch(player.walkupSong, userArtists);
-            const genreMatch = this.calculateGenreMatchScore(userTopGenres, player.walkupSong.genre);
-            
-            // Combine scores with weights
-            let matchScore = 0;
-            let matchReason = genreMatch.matchReason;
-            let rankInfo = '';
+    // Calculate match scores for all valid players
+    const playersWithScores = validPlayers.map(player => {
+      const songMatch = this.findSongMatch(player.walkupSong, userTracks, userSaved);
+      const artistMatch = this.findArtistMatch(player.walkupSong, userArtists);
+      const genreMatch = this.calculateGenreMatchScore(userTopGenres, player.walkupSong.genre);
+      
+      // Combine scores with weights
+      let matchScore = 0;
+      let matchReason = genreMatch.matchReason;
+      let rankInfo = '';
 
-            if (songMatch.score === 0.9) {
-              matchScore = 1.5;
-              matchReason = 'Liked song';
-            } else if (songMatch.score > 0) {
-              if (songMatch.score >= 1.0) {
-                matchScore = 2.0 + (songMatch.rankBonus || 0);
-                matchReason = 'Top song';
-                if (songMatch.rank && songMatch.timeFrame) {
-                  rankInfo = `#${songMatch.rank} ${songMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(songMatch.timeFrame)}`}`;
-                }
-              } else {
-                matchScore = 1.0;
-                matchReason = 'Partial song match';
-              }
-            } else if (artistMatch.score > 0) {
-              if (artistMatch.score >= 0.8) {
-                matchScore = 1.2 + (artistMatch.score - 0.8);
-                matchReason = 'Top artist';
-                if (artistMatch.rank && artistMatch.timeFrame) {
-                  rankInfo = `#${artistMatch.rank} ${artistMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(artistMatch.timeFrame)}`}`;
-                }
-              } else {
-                matchScore = 0.8;
-                matchReason = 'Partial artist match';
-              }
-            } else {
-              matchScore = genreMatch.matchScore * 0.5;
-            }
-
-            // Apply artist diversity penalty
-            const artistCount = this.usedArtists.get(player.walkupSong.artistName) || 0;
-            if (artistCount > 0) {
-              matchScore *= (1 - (artistCount * 0.2));
-            }
-            
-            return { player, matchScore, matchReason, rankInfo };
-          });
-          
-          // Sort by match score and take top 5
-          const topPitchers = pitchersWithScores
-            .sort((a, b) => b.matchScore - a.matchScore)
-            .slice(0, 5);
-          
-          // Add each pitcher to the team with their position adjusted
-          topPitchers.forEach((pitcher, index) => {
-            const position = index === 0 ? 'RP' : `RP${index + 1}`;
-            this.usedSongs.add(pitcher.player.walkupSong.songName);
-            this.incrementArtistCount(pitcher.player.walkupSong.artistName);
-            team.push({
-              ...pitcher.player,
-              position,
-              matchReason: pitcher.matchReason,
-              rankInfo: pitcher.rankInfo,
-              matchScore: pitcher.matchScore
-            });
-          });
-          
-          continue;
-        }
-      }
-      
-      // Regular position handling (non-RP)
-      const positionPlayers = allPlayerSongs.filter(p => 
-        p.position.toUpperCase() === position && !this.usedSongs.has(p.walkupSong.songName)
-      );
-      
-      if (positionPlayers.length === 0) {
-        console.log(`No players found for position ${position}`);
-        continue;
-      }
-      
-      console.log(`Found ${positionPlayers.length} players for position ${position}`);
-      
-      // Calculate match scores for each player using multiple criteria
-      const playersWithScores = positionPlayers.map(player => {
-        const songMatch = this.findSongMatch(player.walkupSong, userTracks, userSaved);
-        const artistMatch = this.findArtistMatch(player.walkupSong, userArtists);
-        const genreMatch = this.calculateGenreMatchScore(userTopGenres, player.walkupSong.genre);
-        
-        // Combine scores with weights, prioritizing top song matches
-        let matchScore = 0;
-        let matchReason = genreMatch.matchReason;
-        let rankInfo = '';
-
-        if (songMatch.score === 0.9) {
-          matchScore = 1.5;
-          matchReason = 'Liked song';
-        } else if (songMatch.score > 0) {
-          if (songMatch.score >= 1.0) {
-            matchScore = 2.0 + (songMatch.rankBonus || 0);
-            matchReason = 'Top song';
-            if (songMatch.rank && songMatch.timeFrame) {
-              rankInfo = `#${songMatch.rank} ${songMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(songMatch.timeFrame)}`}`;
-            }
-          } else {
-            matchScore = 1.0;
-            matchReason = 'Partial song match';
-          }
-        } else if (artistMatch.score > 0) {
-          if (artistMatch.score >= 0.8) {
-            matchScore = 1.2 + (artistMatch.score - 0.8);
-            matchReason = 'Top artist';
-            if (artistMatch.rank && artistMatch.timeFrame) {
-              rankInfo = `#${artistMatch.rank} ${artistMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(artistMatch.timeFrame)}`}`;
-            }
-          } else {
-            matchScore = 0.8;
-            matchReason = 'Partial artist match';
+      if (songMatch.score === 0.9) {
+        matchScore = 1.5;
+        matchReason = 'Liked song';
+      } else if (songMatch.score > 0) {
+        if (songMatch.score >= 1.0) {
+          matchScore = 2.0 + (songMatch.rankBonus || 0);
+          matchReason = 'Top song';
+          if (songMatch.rank && songMatch.timeFrame) {
+            rankInfo = `#${songMatch.rank} ${songMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(songMatch.timeFrame)}`}`;
           }
         } else {
-          matchScore = genreMatch.matchScore * 0.5;
+          matchScore = 1.0;
+          matchReason = 'Partial song match';
         }
+      } else if (artistMatch.score > 0) {
+        if (artistMatch.score >= 0.8) {
+          matchScore = 1.2 + (artistMatch.score - 0.8);
+          matchReason = 'Top artist';
+          if (artistMatch.rank && artistMatch.timeFrame) {
+            rankInfo = `#${artistMatch.rank} ${artistMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(artistMatch.timeFrame)}`}`;
+          }
+        } else {
+          matchScore = 0.8;
+          matchReason = 'Partial artist match';
+        }
+      } else {
+        matchScore = genreMatch.matchScore * 0.5;
+      }
 
-        // Apply artist diversity penalty
-        const artistCount = this.usedArtists.get(player.walkupSong.artistName) || 0;
-        if (artistCount > 0) {
-          matchScore *= (1 - (artistCount * 0.2));
-        }
-        
-        return { player, matchScore, matchReason, rankInfo };
-      });
-      
-      // Log top 3 matches for debugging
-      const topMatches = [...playersWithScores]
-        .sort((a, b) => b.matchScore - a.matchScore)
-        .slice(0, 3);
-      
-      console.log(`Top 3 matches for ${position}:`);
-      topMatches.forEach(match => {
-        console.log(`- ${match.player.playerName}: ${match.matchScore.toFixed(2)} (${match.matchReason} ${match.rankInfo})`);
-      });
-      
-      // Filter out players with low match scores
-      const validMatches = playersWithScores.filter(p => p.matchScore >= this.MIN_MATCH_SCORE);
-      
-      if (validMatches.length === 0) {
-        console.log(`No good matches found for position ${position}, using best available match`);
-        // Use the best match even if below threshold
-        const bestMatch = playersWithScores.sort((a, b) => b.matchScore - a.matchScore)[0];
-        if (bestMatch) {
-          this.usedSongs.add(bestMatch.player.walkupSong.songName);
-          this.incrementArtistCount(bestMatch.player.walkupSong.artistName);
-          team.push({
-            ...bestMatch.player,
-            matchReason: bestMatch.matchReason,
-            rankInfo: bestMatch.rankInfo
-          });
-        }
-        continue;
+      // Apply artist diversity penalty
+      const artistCount = this.usedArtists.get(player.walkupSong.artistName) || 0;
+      if (artistCount > 0) {
+        matchScore *= (1 - (artistCount * 0.2));
       }
       
-      // Sort by match score (descending)
-      validMatches.sort((a, b) => b.matchScore - a.matchScore);
+      return { player, matchScore, matchReason, rankInfo };
+    });
+    
+    // Sort all players by match score
+    const sortedPlayers = playersWithScores
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .filter(p => p.matchScore >= this.MIN_MATCH_SCORE);
+    
+    console.log(`Found ${sortedPlayers.length} players with match scores above minimum threshold`);
+    
+    // Take the top players needed for the team
+    const selectedPlayers = sortedPlayers.slice(0, positions.length);
+    
+    // Assign positions to selected players
+    selectedPlayers.forEach((playerWithScore, index) => {
+      const position = positions[index];
+      this.usedSongs.add(playerWithScore.player.walkupSong.songName);
+      this.incrementArtistCount(playerWithScore.player.walkupSong.artistName);
       
-      // Get the best matching player for this position
-      const bestMatch = validMatches[0];
-      console.log(`Best match for ${position}: ${bestMatch.player.playerName} (Score: ${bestMatch.matchScore.toFixed(2)})`);
-      
-      this.usedSongs.add(bestMatch.player.walkupSong.songName);
-      this.incrementArtistCount(bestMatch.player.walkupSong.artistName);
       team.push({
-        ...bestMatch.player,
-        matchReason: bestMatch.matchReason,
-        rankInfo: bestMatch.rankInfo
+        ...playerWithScore.player,
+        position,
+        matchReason: playerWithScore.matchReason,
+        rankInfo: playerWithScore.rankInfo,
+        matchScore: playerWithScore.matchScore
       });
-    }
+    });
     
     return team;
   }
@@ -264,10 +576,15 @@ export class WalkupSongService {
    * Find direct song matches
    */
   private findSongMatch(
-    walkupSong: { songName: string; artistName: string },
+    walkupSong: { songName: string | null | undefined; artistName: string | null | undefined },
     userTracks: { short_term: Array<{ name: string; artist: string }>, medium_term: Array<{ name: string; artist: string }>, long_term: Array<{ name: string; artist: string }> },
     userSaved: Array<{ name: string; artist: string }>
   ): { score: number; rank?: number; rankBonus?: number; timeFrame?: 'short_term' | 'medium_term' | 'long_term' } {
+    // Skip if song name or artist name is missing
+    if (!walkupSong.songName || !walkupSong.artistName) {
+      return { score: 0 };
+    }
+
     const normalizedSong = {
       name: walkupSong.songName.toLowerCase(),
       artist: walkupSong.artistName.toLowerCase()
@@ -318,9 +635,14 @@ export class WalkupSongService {
    * Find artist matches
    */
   private findArtistMatch(
-    walkupSong: { artistName: string },
+    walkupSong: { artistName: string | null | undefined },
     userArtists: { short_term: string[], medium_term: string[], long_term: string[] }
   ): { score: number; rank?: number; timeFrame?: 'short_term' | 'medium_term' | 'long_term' } {
+    // Skip if artist name is missing
+    if (!walkupSong.artistName) {
+      return { score: 0 };
+    }
+
     const normalizedArtist = walkupSong.artistName.toLowerCase();
     
     // Check for exact artist match across all time frames
