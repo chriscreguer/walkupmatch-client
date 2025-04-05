@@ -102,6 +102,18 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
     );
   }
 
+  // Get all matching songs for each player
+  const allMatchingSongs = team.players.flatMap(player => {
+    if (!player.matchingSongs) return [];
+    return player.matchingSongs.map(song => ({
+      ...song,
+      playerId: player.id,
+      playerName: player.name,
+      playerPosition: player.position,
+      playerTeam: player.team
+    }));
+  }).sort((a, b) => b.matchScore - a.matchScore);
+
   return (
     <div className="w-full mt-6">
       <div className="flex justify-between items-center mb-2">
@@ -126,23 +138,20 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
         
         {/* Playlist Items */}
         <div>
-          {[...team.songs]
-            .sort((a, b) => b.matchScore - a.matchScore)
-            .map((song) => {
-            const player = findPlayerById(team.players, song.playerMatch);
-            const isPlaying = playingAudio === song.id;
+          {allMatchingSongs.map((song, index) => {
+            const isPlaying = playingAudio === `${song.playerId}-${index}`;
             
             return (
-              <div key={song.id} className="grid grid-cols-12 gap-4 p-2">
+              <div key={`${song.playerId}-${index}`} className="grid grid-cols-12 gap-4 p-2">
                 {/* Song Info */}
                 <div className="col-span-6 min-w-0 flex items-center">
                   <button 
-                    onClick={() => handleAlbumClick(song.id, song.previewUrl)}
+                    onClick={() => handleAlbumClick(`${song.playerId}-${index}`, song.previewUrl)}
                     className="relative w-14 h-14 rounded overflow-hidden mr-3 group flex-shrink-0"
                   >
                     <Image 
                       src={song.albumArt} 
-                      alt={song.name} 
+                      alt={song.songName} 
                       width={56}
                       height={56}
                       className="object-cover"
@@ -161,26 +170,24 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
                     </div>
                   </button>
                   <div className="flex flex-col min-w-0">
-                    <span className="text-black font-medium truncate">{song.name}</span>
-                    <span className="text-black text-opacity-70 text-sm truncate">{song.artist}</span>
+                    <span className="text-black font-medium truncate">{song.songName}</span>
+                    <span className="text-black text-opacity-70 text-sm truncate">{song.artistName}</span>
                   </div>
                 </div>
                 
                 {/* Player Info */}
                 <div className="col-span-4 min-w-0">
-                  {player && (
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-1 items-baseline">
-                        <span className="text-black text-sm truncate">{player.name}</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-black text-opacity-70 font-bold uppercase text-xs">
-                          {player.position}
-                        </span>
-                        <span className="text-black text-opacity-70 text-xs">{player.teamAbbreviation}</span>
-                      </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-1 items-baseline">
+                      <span className="text-black text-sm truncate">{song.playerName}</span>
                     </div>
-                  )}
+                    <div className="flex items-center gap-1">
+                      <span className="text-black text-opacity-70 font-bold uppercase text-xs">
+                        {song.playerPosition}
+                      </span>
+                      <span className="text-black text-opacity-70 text-xs">{song.playerTeam}</span>
+                    </div>
+                  </div>
                 </div>
                 
                 {/* Match Reason */}

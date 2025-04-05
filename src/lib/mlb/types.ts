@@ -1,16 +1,40 @@
 // Available player positions
-export type Position = 'SP' | 'C' | '1B' | '2B' | '3B' | 'SS' | 'LF' | 'CF' | 'RF' | 'DH' | 'RP';
+export type Position = 'SP' | 'C' | '1B' | '2B' | '3B' | 'SS' | 'LF' | 'CF' | 'RF' | 'DH' | 'P1' | 'P2' | 'P3' | 'P4';
+
+// Player statistics from MySportsFeeds
+export interface PlayerStats {
+  batting?: {
+    battingAvg: number;
+    onBasePercentage: number;
+    sluggingPercentage: number;
+    plateAppearances: number;
+  };
+  pitching?: {
+    earnedRunAvg: number;
+    inningsPitched: number;
+  };
+}
 
 // Player information
 export interface Player {
   id: string;
   name: string;
-  position: Position;
-  team: string;
-  headshot: string;
   firstName: string;
   lastName: string;
+  position: Position;
+  team: string;
   teamAbbreviation: string;
+  headshot: string;
+  stats?: PlayerStats;
+  matchingSongs?: Array<{
+    songName: string;
+    artistName: string;
+    matchScore: number;
+    matchReason: string;
+    rankInfo: string;
+    albumArt: string;
+    previewUrl?: string | null;
+  }>;
 }
 
 // Team statistics
@@ -32,7 +56,7 @@ export interface Song {
   matchScore: number; // 0-3 representing match strength
   matchReason: string; // e.g. "In your top songs", "Matches your genre preferences", etc.
   rankInfo?: string; // e.g. "#4 in your top tracks"
-  previewUrl?: string; // Spotify preview URL for 30-second sample
+  previewUrl?: string | null; // Spotify preview URL for 30-second sample
 }
 
 // Team data structure

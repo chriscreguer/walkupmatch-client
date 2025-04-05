@@ -48,7 +48,7 @@ export function TeamProfile({ team, loading = false }: TeamProfileProps) {
       </div>
       
       {/* Team info */}
-      <div className="flex flex-col">
+      <div className="flex flex-col mr-2">
         <h2 className="font-bold text-lg text-black">
           {team?.name || `${userName}'s Team`}
         </h2>
@@ -56,7 +56,7 @@ export function TeamProfile({ team, loading = false }: TeamProfileProps) {
         {/* Stats */}
         <div className="flex flex-row gap-7 mt-1">
           <div className="flex flex-col">
-            <span className="text-black text-opacity-70 font-bold uppercase text-xs">W-L</span>
+            <span className="text-black text-opacity-70 font-bold uppercase text-xs">Proj. W-L</span>
             <span className="text-black font-bold text-base">
               {team ? `${team.stats.wins}-${team.stats.losses}` : '0-0'}
             </span>
@@ -83,6 +83,17 @@ export function TeamProfile({ team, loading = false }: TeamProfileProps) {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Sell team image */}
+      <div className="relative h-[100px] w-[100px] mb-[-24px] ml-4">
+        <Image
+          src="/images/selltheteam.png"
+          alt="Sell team"
+          fill
+          className="object-contain"
+  
+        />
       </div>
     </div>
   );

@@ -2,13 +2,14 @@
   "name": "walkupmatch-client",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "update-walkup-songs": "tsx scripts/updateWalkupSongs.ts"
+    "update-walkup-songs": "tsx --tsconfig tsconfig.scripts.json src/scripts/updateWalkupSongs.ts",
+    "enrich-player-data": "tsx --tsconfig tsconfig.scripts.json src/scripts/enrichPlayerData.ts",
+    "run-enrichment": "tsx --tsconfig tsconfig.scripts.json src/scripts/runEnrichment.ts"
   },
   "dependencies": {
     "@types/next-auth": "^3.13.0",

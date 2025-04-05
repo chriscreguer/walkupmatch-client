@@ -86,67 +86,99 @@ export function calculateTeamERA(pitcherStats: PitcherStats[]): number {
 }
 
 /**
- * Calculate expected team stats based on the provided spec
+ * Calculate team stats based on player data from MySportsFeeds
  */
 export function calculateTeamStats(
   hitters: Player[], 
-  pitchers: Player[],
-  mlbAverages = {
-    gamesPlayed: 162,
-    teamPAPerGame: 38,
-    teamIPPerGame: 9
-  }
+  pitchers: Player[]
 ): TeamStats {
-  // In a real implementation, we would fetch each player's stats from an API
-  // For now, we'll use mock stats just to demonstrate the calculation logic
-  
-  // Mock hitter stats (in a real app, these would come from an API)
-  const mockHitterStats: HitterStats[] = hitters.map(() => ({
-    PA: 650,
-    H: 172,
-    AB: 600,
-    BB: 40,
-    HBP: 5,
-    SF: 5,
-    TB: 280,
-    R: 85
-  }));
-  
-  // Mock pitcher stats (in a real app, these would come from an API)
-  const mockPitcherStats: PitcherStats[] = pitchers.map(() => ({
-    IP: 180,
-    ER: 70,
-    R: 75
-  }));
-  
-  // Calculate runs scored per plate appearance
-  const totalRunsScored = mockHitterStats.reduce((sum, player) => sum + player.R, 0);
-  const totalPA = mockHitterStats.reduce((sum, player) => sum + player.PA, 0);
-  const runsPerPA = totalPA === 0 ? 0 : totalRunsScored / totalPA;
-  
-  // Calculate runs allowed per inning pitched
-  const totalRunsAllowed = mockPitcherStats.reduce((sum, player) => sum + player.R, 0);
-  const totalIP = mockPitcherStats.reduce((sum, player) => sum + player.IP, 0);
-  const runsPerIP = totalIP === 0 ? 0 : totalRunsAllowed / totalIP;
-  
-  // Estimate team runs scored for a full season
-  const projectedRunsScored = runsPerPA * mlbAverages.teamPAPerGame * mlbAverages.gamesPlayed;
-  
-  // Estimate team runs allowed for a full season
-  const projectedRunsAllowed = runsPerIP * mlbAverages.teamIPPerGame * mlbAverages.gamesPlayed;
-  
-  // Calculate pythagorean win-loss
-  const { wins, losses } = calculatePythagoreanWinLoss(
-    projectedRunsScored,
-    projectedRunsAllowed,
-    mlbAverages.gamesPlayed
-  );
-  
-  // Calculate other stats
-  const teamAVG = calculateTeamAVG(mockHitterStats);
-  const teamOPS = calculateTeamOPS(mockHitterStats);
-  const teamERA = calculateTeamERA(mockPitcherStats);
-  
+  // League averages
+  const LEAGUE_AVG_ERA = 3.90;
+  const LEAGUE_AVG_OPS = 0.711;
+  const LEAGUE_AVG_RUNS_PER_GAME = 4.55;
+  const GAMES_IN_SEASON = 162;
+
+  console.log('Input players:', {
+    hitters: hitters.map(p => ({
+      name: p.name,
+      stats: p.stats
+    })),
+    pitchers: pitchers.map(p => ({
+      name: p.name,
+      stats: p.stats
+    }))
+  });
+
+  // Calculate batting stats for non-pitchers
+  const validHitterStats = hitters
+    .map(player => player.stats?.batting)
+    .filter((stats): stats is NonNullable<typeof stats> => 
+      stats !== undefined
+    );
+
+  console.log('Valid hitter stats:', validHitterStats);
+
+  // Calculate pitching stats
+  const validPitcherStats = pitchers
+    .map(player => player.stats?.pitching)
+    .filter((stats): stats is NonNullable<typeof stats> => 
+      stats !== undefined
+    );
+
+  console.log('Valid pitcher stats:', validPitcherStats);
+
+  // Calculate team AVG (batting average)
+  const teamAVG = validHitterStats.length > 0
+    ? validHitterStats.reduce((sum, stats) => {
+        const avg = stats.battingAvg || 0;
+        console.log('Adding batting avg:', avg);
+        return sum + avg;
+      }, 0) / validHitterStats.length
+    : 0;
+
+  console.log('Team AVG:', teamAVG);
+
+  // Calculate team OPS (on-base plus slugging)
+  const teamOPS = validHitterStats.length > 0
+    ? validHitterStats.reduce((sum, stats) => {
+        const ops = (stats.onBasePercentage || 0) + (stats.sluggingPercentage || 0);
+        console.log('Adding OPS:', ops, 'from', {
+          onBasePercentage: stats.onBasePercentage,
+          sluggingPercentage: stats.sluggingPercentage
+        });
+        return sum + ops;
+      }, 0) / validHitterStats.length
+    : 0;
+
+  console.log('Team OPS:', teamOPS);
+
+  // Calculate team ERA (earned run average)
+  const teamERA = validPitcherStats.length > 0
+    ? validPitcherStats.reduce((sum, stats) => {
+        const era = stats.earnedRunAvg || 0;
+        console.log('Adding ERA:', era);
+        return sum + era;
+      }, 0) / validPitcherStats.length
+    : 0;
+
+  console.log('Team ERA:', teamERA);
+
+  // Calculate Runs Scored (RS) based on team OPS relative to league average
+  const runsScored = (teamOPS / LEAGUE_AVG_OPS) * LEAGUE_AVG_RUNS_PER_GAME;
+  console.log('Estimated Runs Scored per game:', runsScored);
+
+  // Calculate Runs Allowed (RA) based on team ERA relative to league average
+  const runsAllowed = (teamERA / LEAGUE_AVG_ERA) * LEAGUE_AVG_RUNS_PER_GAME;
+  console.log('Estimated Runs Allowed per game:', runsAllowed);
+
+  // Calculate win percentage using Pythagorean Expectation
+  const winPercentage = Math.pow(runsScored, 2) / (Math.pow(runsScored, 2) + Math.pow(runsAllowed, 2));
+  console.log('Win Percentage:', winPercentage);
+
+  // Calculate wins and losses
+  const wins = Math.round(winPercentage * GAMES_IN_SEASON);
+  const losses = GAMES_IN_SEASON - wins;
+
   return {
     wins,
     losses,

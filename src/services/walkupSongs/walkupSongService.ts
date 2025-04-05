@@ -26,7 +26,19 @@ const playerSchema = new mongoose.Schema({
   matchReason: String,
   rankInfo: String,
   matchScore: Number,
-  lastUpdated: { type: Date, default: Date.now }
+  lastUpdated: { type: Date, default: Date.now },
+  stats: {
+    batting: {
+      battingAvg: Number,
+      onBasePercentage: Number,
+      sluggingPercentage: Number,
+      plateAppearances: Number
+    },
+    pitching: {
+      earnedRunAvg: Number,
+      inningsPitched: Number
+    }
+  }
 });
 
 // Define TypeScript interface for MongoDB document
@@ -51,6 +63,67 @@ interface PlayerDocument extends mongoose.Document {
   rankInfo?: string;
   matchScore?: number;
   lastUpdated: Date;
+  stats: {
+    batting: {
+      battingAvg: number;
+      onBasePercentage: number;
+      sluggingPercentage: number;
+      plateAppearances: number;
+    };
+    pitching: {
+      earnedRunAvg: number;
+      inningsPitched: number;
+    };
+  };
+}
+
+// Matching data types
+interface NormalizedTrack {
+  name: string;
+  artist: string;
+  spotifyId?: string;
+  rank?: number;
+  timeFrame?: TimeFrame;
+}
+
+interface NormalizedArtist {
+  name: string;
+  id?: string;
+  rank?: number;
+  timeFrame?: TimeFrame;
+}
+
+interface MatchResult {
+  score: number;
+  reason: string;
+  details?: string;
+  rank?: number;
+  timeFrame?: TimeFrame;
+}
+
+interface PlayerWithScore {
+  player: PlayerWalkupSong;
+  matchScore: number;
+  originalMatchScore: number;
+  matchReason: string;
+  rankInfo: string;
+  matchingSongs: Array<{
+    songName: string;
+    artistName: string;
+    matchScore: number;
+    matchReason: string;
+    rankInfo: string;
+    albumArt: string;
+    previewUrl?: string | null;
+  }>;
+}
+
+type TimeFrame = 'short_term' | 'medium_term' | 'long_term';
+
+// We now wrap each team assignment with the candidate and its assigned slot.
+interface TeamAssignment {
+  candidate: PlayerWithScore;
+  assignedPosition: Position;
 }
 
 // Get existing model or create new one
@@ -76,21 +149,94 @@ interface APIResponse {
 }
 
 /**
- * Service for matching user music preferences with walkup songs
+ * Service for matching user music preferences with walkup songs.
+ * This version uses a two‑pass greedy approach:
+ *  • First pass: For each position, select the highest‑scoring eligible candidate while ensuring
+ *    uniqueness of both players and songs. The assigned slot is stored separately.
+ *  • Second pass: For positions with duplicate artists or songs, attempt to swap the lower‑ranked occurrence
+ *    with an alternative candidate. When evaluating alternatives, we compute an effective score (applying
+ *    a penalty based on how many times the candidate's artist already appears) and then assign the candidate
+ *    to the slot (overriding their DB position).
  */
 export class WalkupSongService {
   private static instance: WalkupSongService;
   private readonly API_BASE_URL = 'https://walkupdb.com/api';
-  private readonly RATE_LIMIT_DELAY = 1000; // 1 second delay between requests
+  private readonly RATE_LIMIT_DELAY = 1000;
   private isUpdating = false;
   private readonly MIN_MATCH_SCORE = 0.1;
   private usedSongs: Set<string> = new Set();
-  private usedArtists: Map<string, number> = new Map();
-  
+  private genreSimilarityCache: Map<string, boolean> = new Map();
+
+  // Compatibility matrices; DH handled separately
+  private readonly COMPATIBLE_POSITIONS: Record<string, string[]> = {
+    'C': [],
+    '1B': [],
+    '2B': ['SS'],
+    '3B': [],
+    'SS': ['2B'],
+    'OF': [],
+    'DH': [],
+    'P': []
+  };
+  private readonly SIMILAR_POSITIONS: Record<string, string[]> = {
+    'C': [],
+    '1B': [],
+    '2B': ['3B'],
+    '3B': ['SS, 2B'],
+    'SS': ['3B'],
+    'OF': [],
+    'DH': ['1B', 'OF'],
+    'P': []
+  };
+  // For DH, fallback positions if no direct match
+  private readonly FALLBACK_POSITIONS: Record<string, string[]> = {
+    'DH': ['2B', '3B', 'C', 'SS']
+  };
+
+  // Position weight mapping
+  private readonly POSITION_WEIGHTS: Record<string, number> = {
+    'EXACT': 1.0,
+    'SIMILAR': 0.8,
+    'COMPATIBLE': 0.6,
+    'FALLBACK': 0.4
+  };
+
+  // Score adjustment weights - UPDATED AS REQUESTED
+  private readonly SCORE_WEIGHTS = {
+    TIME_FRAME: {
+      'long_term': 0.05,
+      'medium_term': 0.03,
+      'short_term': 0.01
+    },
+    RANK: {
+      TOP_10: 0.2,
+      TOP_25: 0.1,
+      TOP_50: 0
+    },
+    MATCH_TYPE: {
+      LIKED_SONG: 1.2, // Changed from 1.5 to 1.2
+      TOP_SONG: 1.5,   // Changed from 1.0 to 1.5
+      TOP_ARTIST: 0.8,
+      PARTIAL_SONG: 0.2, // Changed from 0.6 to 0.2
+      PARTIAL_ARTIST: 0.2, // Changed from 0.5 to 0.2
+      GENRE: 0.4
+    },
+    // Penalty for duplicate artist occurrences:
+    ARTIST_DIVERSITY_PENALTY: {
+      FIRST: 0.0,
+      SECOND: 0.4,
+      THIRD: 0.6,
+      FOURTH: 0.7,
+      FIFTH_PLUS: 0.8
+    },
+    MULTIPLE_MATCHES_BONUS: 0.1,
+    GENRE_VARIETY_BONUS: 0.15,
+    // Small bonus for genre matches where user has liked songs by the artist
+    GENRE_ARTIST_LIKED_BONUS: 0.05
+  };
+
   private constructor() {
-    // Initialize MongoDB connection
     this.initializeMongoDB();
-    // Schedule daily updates
     this.scheduleDailyUpdate();
   }
 
@@ -105,40 +251,25 @@ export class WalkupSongService {
     try {
       console.log('Attempting to connect to MongoDB...');
       console.log('MongoDB URI:', process.env.MONGO_URI ? 'Set' : 'Not set');
-      
       if (!process.env.MONGO_URI) {
         throw new Error('MONGO_URI environment variable is not set');
       }
-      
       await mongoose.connect(process.env.MONGO_URI);
       console.log('Connected to MongoDB successfully');
-      
-      // Verify connection
       const db = mongoose.connection;
       console.log('MongoDB connection state:', db.readyState);
       console.log('MongoDB database name:', db.name);
-      
-      // Check if we can access the players collection
       if (db.db) {
         const collections = await db.db.listCollections().toArray();
         console.log('Available collections:', collections.map(c => c.name));
-      } else {
-        console.log('Database object not available');
       }
     } catch (error) {
       console.error('MongoDB connection error:', error);
-      if (error instanceof Error) {
-        console.error('Error details:', {
-          message: error.message,
-          stack: error.stack
-        });
-      }
       throw error;
     }
   }
 
   private scheduleDailyUpdate() {
-    // Run at 3 AM every day
     cron.schedule('0 3 * * *', async () => {
       console.log('Starting scheduled player data update...');
       await this.updatePlayerData();
@@ -155,29 +286,18 @@ export class WalkupSongService {
     let hasMore = true;
     let retryCount = 0;
     const MAX_RETRIES = 5;
-    const BASE_DELAY = 2000; // 2 seconds base delay
-
+    const BASE_DELAY = 2000;
     while (hasMore) {
       try {
         console.log(`Fetching page ${page}...`);
-        const response = await axios.get(`${this.API_BASE_URL}/players`, {
-          params: { page }
-        });
-
+        const response = await axios.get(`${this.API_BASE_URL}/players`, { params: { page } });
         console.log(`Response status: ${response.status}`);
-        
         if (response.data && response.data.data && response.data.data.length > 0) {
           allPlayers.push(...response.data.data);
           console.log(`Added ${response.data.data.length} players. Total: ${allPlayers.length}`);
-          
-          // Check if there's a next page
           hasMore = response.data.links && response.data.links.next !== null;
           page++;
-          
-          // Reset retry count on successful request
           retryCount = 0;
-          
-          // Add delay between successful requests
           await this.delay(this.RATE_LIMIT_DELAY);
         } else {
           console.log('No more players found');
@@ -186,11 +306,9 @@ export class WalkupSongService {
       } catch (error) {
         if (axios.isAxiosError(error) && error.response?.status === 429) {
           const retryAfter = parseInt(error.response.headers['retry-after']) || 0;
-          const delay = Math.max(retryAfter * 1000, BASE_DELAY * Math.pow(2, retryCount));
-          
-          console.log(`Rate limited. Waiting ${delay/1000} seconds before retry...`);
-          await this.delay(delay);
-          
+          const delayTime = Math.max(retryAfter * 1000, BASE_DELAY * Math.pow(2, retryCount));
+          console.log(`Rate limited. Waiting ${delayTime / 1000} seconds before retry...`);
+          await this.delay(delayTime);
           retryCount++;
           if (retryCount >= MAX_RETRIES) {
             console.error('Max retries reached. Stopping fetch.');
@@ -198,18 +316,10 @@ export class WalkupSongService {
           }
         } else {
           console.error(`Error fetching page ${page}:`, error);
-          if (axios.isAxiosError(error)) {
-            console.error('Error details:', {
-              status: error.response?.status,
-              statusText: error.response?.statusText,
-              data: error.response?.data
-            });
-          }
           hasMore = false;
         }
       }
     }
-
     return allPlayers;
   }
 
@@ -228,14 +338,11 @@ export class WalkupSongService {
       console.log('Update already in progress');
       return;
     }
-
     this.isUpdating = true;
     console.log('Starting player data update...');
-
     try {
       const players = await this.fetchAllPlayers();
       console.log(`Found ${players.length} players to update`);
-
       for (const player of players) {
         const details = await this.fetchPlayerDetails(player.id);
         if (details) {
@@ -243,7 +350,6 @@ export class WalkupSongService {
         }
         await this.delay(this.RATE_LIMIT_DELAY);
       }
-
       console.log('Player data update completed successfully');
     } catch (error) {
       console.error('Error updating player data:', error);
@@ -254,12 +360,10 @@ export class WalkupSongService {
 
   private async savePlayerToMongoDB(player: APIResponse): Promise<void> {
     try {
-      // Validate required fields
       if (!player?.data?.id || !player?.data?.name || !player?.data?.mlb_id) {
         console.log('Invalid player data:', player);
         return;
       }
-
       const playerData = {
         id: player.data.id,
         mlbId: player.data.mlb_id,
@@ -267,46 +371,38 @@ export class WalkupSongService {
         position: player.data.position || 'Unknown',
         team: player.data.team?.name || 'Unknown',
         teamId: player.data.team?.id || 'Unknown',
-        walkupSong: player.data.songs?.[0] ? {
-          id: player.data.songs[0].id,
-          songName: player.data.songs[0].title,
-          artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
-          albumName: 'Unknown',
-          spotifyId: null,
-          youtubeId: null,
-          genre: [],
-          albumArt: player.data.songs[0].spotify_image || null
-        } : {
-          id: 'no-song',
-          songName: 'No walkup song',
-          artistName: 'Unknown',
-          albumName: 'Unknown',
-          spotifyId: null,
-          youtubeId: null,
-          genre: [],
-          albumArt: null
-        },
+        walkupSong: player.data.songs?.[0]
+          ? {
+              id: player.data.songs[0].id,
+              songName: player.data.songs[0].title,
+              artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
+              albumName: 'Unknown',
+              spotifyId: null,
+              youtubeId: null,
+              genre: [],
+              albumArt: player.data.songs[0].spotify_image || null
+            }
+          : {
+              id: 'no-song',
+              songName: 'No walkup song',
+              artistName: 'Unknown',
+              albumName: 'Unknown',
+              spotifyId: null,
+              youtubeId: null,
+              genre: [],
+              albumArt: null
+            },
         lastUpdated: new Date()
       };
-
       console.log('Processing player:', playerData.name);
-
-      // Check if player exists
       const existingPlayer = await Player.findOne({ id: playerData.id });
-      console.log('Existing player found:', !!existingPlayer);
-
       if (existingPlayer) {
         console.log('Updating existing player:', playerData.id);
-        const updateResult = await Player.updateOne(
-          { id: playerData.id },
-          { $set: playerData }
-        );
-        console.log('Update result:', updateResult);
+        await Player.updateOne({ id: playerData.id }, { $set: playerData });
       } else {
         console.log('Creating new player:', playerData.id);
         const newPlayer = new Player(playerData);
         await newPlayer.save();
-        console.log('Created new player:', playerData.id);
       }
     } catch (error) {
       console.error('Error saving player to MongoDB:', error);
@@ -317,6 +413,7 @@ export class WalkupSongService {
   public async getAllPlayers(): Promise<PlayerWalkupSong[]> {
     try {
       const players = await Player.find({});
+      console.log('Raw player data from MongoDB:', players.map(p => ({ name: p.name, stats: p.stats })));
       return players.map(player => ({
         playerId: player.id,
         playerName: player.name,
@@ -332,6 +429,18 @@ export class WalkupSongService {
           youtubeId: player.walkupSong.youtubeId || '',
           genre: player.walkupSong.genre || [],
           albumArt: player.walkupSong.albumArt || ''
+        },
+        stats: {
+          batting: {
+            battingAvg: player.stats?.batting?.battingAvg || 0,
+            onBasePercentage: player.stats?.batting?.onBasePercentage || 0,
+            sluggingPercentage: player.stats?.batting?.sluggingPercentage || 0,
+            plateAppearances: player.stats?.batting?.plateAppearances || 0
+          },
+          pitching: {
+            earnedRunAvg: player.stats?.pitching?.earnedRunAvg || 0,
+            inningsPitched: player.stats?.pitching?.inningsPitched || 0
+          }
         }
       }));
     } catch (error) {
@@ -344,7 +453,6 @@ export class WalkupSongService {
     try {
       const player = await Player.findOne({ id: playerId });
       if (!player || !player.walkupSong) return null;
-
       return {
         playerId: player.id,
         playerName: player.name,
@@ -431,320 +539,620 @@ export class WalkupSongService {
   }
 
   /**
-   * Find the best player for each position based on multiple matching criteria
+   * Two-pass greedy team selection:
+   *  1. First pass: For each position, select the highest‑scoring eligible candidate,
+   *     ensuring that the same candidate and song are not reused.
+   *     The candidate is wrapped with an assignedPosition field (the team slot).
+   *  2. Second pass: For positions with duplicate artists or songs, attempt to swap
+   *     the lower‑scored occurrence with an alternative candidate. When swapping,
+   *     compute an effective score for both the current candidate and the alternative
+   *     (applying a penalty based on duplicate rank) and update the assignedPosition.
    */
-  async findTeamByPreferences(
+  public async findTeamByPreferences(
     userGenres: SpotifyGenreSummary[],
-    userTopTracks: { short_term: SpotifyTopItem[], medium_term: SpotifyTopItem[], long_term: SpotifyTopItem[] },
-    userTopArtists: { short_term: SpotifyTopItem[], medium_term: SpotifyTopItem[], long_term: SpotifyTopItem[] },
+    userTopTracks: { short_term: SpotifyTopItem[]; medium_term: SpotifyTopItem[]; long_term: SpotifyTopItem[] },
+    userTopArtists: { short_term: SpotifyTopItem[]; medium_term: SpotifyTopItem[]; long_term: SpotifyTopItem[] },
     userSavedTracks: SpotifyTopItem[],
     positions: Position[]
   ): Promise<PlayerWalkupSong[]> {
-    const allPlayerSongs = await this.getAllPlayers(); // Get all players from MongoDB
-    
-    // Filter out players without valid walkup songs
-    const validPlayers = allPlayerSongs.filter(player => 
-      player.walkupSong && 
-      player.walkupSong.songName && 
-      player.walkupSong.artistName &&
-      player.walkupSong.songName !== 'No walkup song'
-    );
+    // Reset caches
+    this.usedSongs.clear();
+    this.genreSimilarityCache.clear();
+    console.log('Starting team preference matching...');
 
-    console.log(`Found ${validPlayers.length} players with valid walkup songs out of ${allPlayerSongs.length} total players`);
-
-    const team: PlayerWalkupSong[] = [];
-    this.usedSongs.clear(); // Reset used songs for new team generation
-    this.usedArtists.clear(); // Reset used artists for new team generation
+    // Get and filter player data
+    const allPlayerSongs = await this.getAllPlayers();
+    console.log('Total players before filtering:', allPlayerSongs.length);
     
-    // Log user's top genres
-    console.log('User top genres:', userGenres.slice(0, 10).map(g => `${g.name} (${g.weight.toFixed(2)})`));
-    
-    // Extract top genres from user preferences with their weights
-    const userTopGenres = userGenres.slice(0, 10).map(g => ({
-      name: g.name,
-      weight: g.weight
-    }));
-    
-    // Normalize user's music data for matching
-    const userTracks = {
-      short_term: this.normalizeTracks(userTopTracks.short_term),
-      medium_term: this.normalizeTracks(userTopTracks.medium_term),
-      long_term: this.normalizeTracks(userTopTracks.long_term)
-    };
-    const userArtists = {
-      short_term: this.normalizeArtists(userTopArtists.short_term),
-      medium_term: this.normalizeArtists(userTopArtists.medium_term),
-      long_term: this.normalizeArtists(userTopArtists.long_term)
-    };
-    const userSaved = this.normalizeTracks(userSavedTracks);
-    
-    // Calculate match scores for all valid players
-    const playersWithScores = validPlayers.map(player => {
-      const songMatch = this.findSongMatch(player.walkupSong, userTracks, userSaved);
-      const artistMatch = this.findArtistMatch(player.walkupSong, userArtists);
-      const genreMatch = this.calculateGenreMatchScore(userTopGenres, player.walkupSong.genre);
+    const validPlayers = allPlayerSongs.filter(player => {
+      // Basic walkup song validation
+      const hasValidWalkupSong = player.walkupSong &&
+        player.walkupSong.songName &&
+        player.walkupSong.artistName &&
+        player.walkupSong.songName !== 'No walkup song';
       
-      // Combine scores with weights
-      let matchScore = 0;
-      let matchReason = genreMatch.matchReason;
-      let rankInfo = '';
+      if (!hasValidWalkupSong) {
+        return false;
+      }
 
-      if (songMatch.score === 0.9) {
-        matchScore = 1.5;
-        matchReason = 'Liked song';
-      } else if (songMatch.score > 0) {
-        if (songMatch.score >= 1.0) {
-          matchScore = 2.0 + (songMatch.rankBonus || 0);
-          matchReason = 'Top song';
-          if (songMatch.rank && songMatch.timeFrame) {
-            rankInfo = `#${songMatch.rank} ${songMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(songMatch.timeFrame)}`}`;
-          }
-        } else {
-          matchScore = 1.0;
-          matchReason = 'Partial song match';
-        }
-      } else if (artistMatch.score > 0) {
-        if (artistMatch.score >= 0.8) {
-          matchScore = 1.2 + (artistMatch.score - 0.8);
-          matchReason = 'Top artist';
-          if (artistMatch.rank && artistMatch.timeFrame) {
-            rankInfo = `#${artistMatch.rank} ${artistMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(artistMatch.timeFrame)}`}`;
-          }
-        } else {
-          matchScore = 0.8;
-          matchReason = 'Partial artist match';
-        }
+      // Stats validation
+      if (player.position !== 'P') {
+        // For non-pitchers, check PA
+        const pa = player.stats?.batting?.plateAppearances ?? 0;
+        return pa >= 5;
       } else {
-        matchScore = genreMatch.matchScore * 0.5;
+        // For pitchers, check IP
+        const ip = player.stats?.pitching?.inningsPitched ?? 0;
+        return ip >= 3;
       }
-
-      // Apply artist diversity penalty
-      const artistCount = this.usedArtists.get(player.walkupSong.artistName) || 0;
-      if (artistCount > 0) {
-        matchScore *= (1 - (artistCount * 0.2));
-      }
-      
-      return { player, matchScore, matchReason, rankInfo };
     });
     
-    // Sort all players by match score
-    const sortedPlayers = playersWithScores
-      .sort((a, b) => b.matchScore - a.matchScore)
-      .filter(p => p.matchScore >= this.MIN_MATCH_SCORE);
-    
-    console.log(`Found ${sortedPlayers.length} players with match scores above minimum threshold`);
-    
-    // Take the top players needed for the team
-    const selectedPlayers = sortedPlayers.slice(0, positions.length);
-    
-    // Assign positions to selected players
-    selectedPlayers.forEach((playerWithScore, index) => {
-      const position = positions[index];
-      this.usedSongs.add(playerWithScore.player.walkupSong.songName);
-      this.incrementArtistCount(playerWithScore.player.walkupSong.artistName);
-      
-      team.push({
-        ...playerWithScore.player,
-        position,
-        matchReason: playerWithScore.matchReason,
-        rankInfo: playerWithScore.rankInfo,
-        matchScore: playerWithScore.matchScore
-      });
-    });
-    
-    return team;
-  }
-  
-  /**
-   * Normalize tracks for matching
-   */
-  private normalizeTracks(tracks: SpotifyTopItem[]): Array<{ name: string; artist: string }> {
-    return tracks.map(track => ({
-      name: track.name.toLowerCase(),
-      artist: track.artists?.[0]?.name.toLowerCase() || ''
-    }));
-  }
-  
-  /**
-   * Normalize artists for matching
-   */
-  private normalizeArtists(artists: SpotifyTopItem[]): string[] {
-    return artists.map(artist => artist.name.toLowerCase());
-  }
-  
-  /**
-   * Find direct song matches
-   */
-  private findSongMatch(
-    walkupSong: { songName: string | null | undefined; artistName: string | null | undefined },
-    userTracks: { short_term: Array<{ name: string; artist: string }>, medium_term: Array<{ name: string; artist: string }>, long_term: Array<{ name: string; artist: string }> },
-    userSaved: Array<{ name: string; artist: string }>
-  ): { score: number; rank?: number; rankBonus?: number; timeFrame?: 'short_term' | 'medium_term' | 'long_term' } {
-    // Skip if song name or artist name is missing
-    if (!walkupSong.songName || !walkupSong.artistName) {
-      return { score: 0 };
-    }
+    console.log('Players after filtering:', validPlayers.length);
+    console.log('Sample of filtered players:', validPlayers.slice(0, 5).map(p => ({
+      name: p.playerName,
+      position: p.position,
+      pa: p.stats?.batting?.plateAppearances,
+      ip: p.stats?.pitching?.inningsPitched
+    })));
 
-    const normalizedSong = {
-      name: walkupSong.songName.toLowerCase(),
-      artist: walkupSong.artistName.toLowerCase()
-    };
-    
-    // Check for exact matches in top tracks across all time frames
-    // Order of time frames matters for priority
-    const timeFrames: Array<'short_term' | 'medium_term' | 'long_term'> = ['medium_term', 'long_term', 'short_term'];
-    for (const timeFrame of timeFrames) {
-      const tracks = userTracks[timeFrame];
-      const trackIndex = tracks.findIndex(track => 
-        track.name === normalizedSong.name && track.artist === normalizedSong.artist
-      );
-      
-      if (trackIndex !== -1) {
-        const rank = trackIndex + 1;
-        // Add a small bonus for medium term (0.05), then long term (0.03)
-        const timeFrameBonus = timeFrame === 'medium_term' ? 0.05 : timeFrame === 'long_term' ? 0.03 : 0;
-        // Increased rank bonus for higher-ranked songs (top 10 get 0.5, top 25 get 0.3, top 50 get 0.1)
-        const rankBonus = rank <= 10 ? 0.5 : rank <= 25 ? 0.3 : rank <= 50 ? 0.1 : 0;
-        return { 
-          score: 1.0 + timeFrameBonus, // Base score of 1.0 plus time frame bonus
-          rank, 
-          rankBonus,
-          timeFrame
-        };
-      }
-    }
-    
-    // Check for saved songs with higher priority
-    const savedMatch = userSaved.some(track => 
-      track.name === normalizedSong.name && track.artist === normalizedSong.artist
-    );
-    
-    if (savedMatch) return { score: 0.9 }; // Increased from 0.8 to be above artist matches
-    
-    // Check for partial matches (same song, different artist)
-    const partialMatch = Object.values(userTracks).some(tracks => 
-      tracks.some(track => track.name === normalizedSong.name)
-    );
-    
-    if (partialMatch) return { score: 0.6 };
-    
-    return { score: 0 };
-  }
-  
-  /**
-   * Find artist matches
-   */
-  private findArtistMatch(
-    walkupSong: { artistName: string | null | undefined },
-    userArtists: { short_term: string[], medium_term: string[], long_term: string[] }
-  ): { score: number; rank?: number; timeFrame?: 'short_term' | 'medium_term' | 'long_term' } {
-    // Skip if artist name is missing
-    if (!walkupSong.artistName) {
-      return { score: 0 };
-    }
-
-    const normalizedArtist = walkupSong.artistName.toLowerCase();
-    
-    // Check for exact artist match across all time frames
-    // Order of time frames matters for priority
-    const timeFrames: Array<'short_term' | 'medium_term' | 'long_term'> = ['medium_term', 'long_term', 'short_term'];
-    for (const timeFrame of timeFrames) {
-      const artists = userArtists[timeFrame];
-      const artistIndex = artists.findIndex(artist => artist === normalizedArtist);
-      if (artistIndex !== -1) {
-        const rank = artistIndex + 1;
-        // Only apply time frame bonus for medium and long term
-        const timeFrameBonus = timeFrame === 'medium_term' ? 0.05 : timeFrame === 'long_term' ? 0.03 : 0;
-        
-        // Increased rank bonus for higher-ranked artists (top 10 get 0.4, top 25 get 0.2, top 50 get 0.1)
-        const rankBonus = rank <= 10 ? 0.4 : rank <= 25 ? 0.2 : rank <= 50 ? 0.1 : 0;
-        
-        // Reduce score for artists past #25 in medium and long term
-        const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 
-          ? (rank - 25) * 0.01 
-          : 0;
-        
-        return { 
-          score: 0.8 + timeFrameBonus + rankBonus - rankPenalty, // Base score of 0.8 plus time frame and rank bonuses minus rank penalty
-          rank,
-          timeFrame
-        };
-      }
-    }
-    
-    // Check for partial artist name match
-    const partialMatch = Object.values(userArtists).some(artists => 
-      artists.some(artist => 
-        artist.includes(normalizedArtist) || normalizedArtist.includes(artist)
-      )
-    );
-    
-    if (partialMatch) return { score: 0.5 };
-    
-    return { score: 0 };
-  }
-  
-  /**
-   * Calculate match score between user genres and player song genres
-   */
-  private calculateGenreMatchScore(
-    userGenres: Array<{ name: string; weight: number }>, 
-    playerGenres: string[]
-  ): { matchScore: number; matchReason: string; matchedGenres: string[] } {
-    // Normalize all genres to lowercase for comparison
-    const normalizedPlayerGenres = playerGenres.map(g => g.toLowerCase());
-    const normalizedUserGenres = userGenres.map(g => ({
+    // Normalize user preferences
+    const userTopGenres = userGenres.slice(0, 10).map(g => ({
       name: g.name.toLowerCase(),
       weight: g.weight
     }));
-    
-    // Find matching genres and their weights
-    const matches = normalizedUserGenres
-      .filter(userGenre => 
-        normalizedPlayerGenres.some(playerGenre => 
-          this.areGenresSimilar(playerGenre, userGenre.name)
-        )
-      )
-      .map(match => ({
-        name: match.name,
-        weight: match.weight
+    const normalizedUserTracks: Record<TimeFrame, NormalizedTrack[]> = { long_term: [], medium_term: [], short_term: [] };
+    for (const timeFrame of ['long_term', 'medium_term', 'short_term'] as TimeFrame[]) {
+      normalizedUserTracks[timeFrame] = userTopTracks[timeFrame].map((track, index) => ({
+        name: (track.name || '').toLowerCase(),
+        artist: (track.artists?.[0]?.name || '').toLowerCase(),
+        spotifyId: track.id,
+        rank: index + 1,
+        timeFrame
       }));
-    
-    // Calculate weighted match score
-    const totalWeight = userGenres.reduce((sum, g) => sum + g.weight, 0);
-    const matchScore = matches.reduce((sum, m) => sum + m.weight, 0) / totalWeight;
-    
-    // Generate match reason based on match quality and matched genres
-    let matchReason = '';
-    const matchedGenreNames = matches.map(m => m.name);
-    
-    if (matchScore >= 0.8) {
-      matchReason = `Strong match with your top genres: ${matchedGenreNames.slice(0, 2).join(', ')}`;
-    } else if (matchScore >= 0.5) {
-      matchReason = `Matches your genre preferences: ${matchedGenreNames[0]}`;
-    } else if (matchScore >= 0.3) {
-      matchReason = `Partial match with your music taste: ${matchedGenreNames[0]}`;
-    } else if (matchScore >= 0.1) {
-      matchReason = `Light match with your music taste: ${matchedGenreNames[0]}`;
+    }
+    const normalizedUserArtists: Record<TimeFrame, NormalizedArtist[]> = { long_term: [], medium_term: [], short_term: [] };
+    for (const timeFrame of ['long_term', 'medium_term', 'short_term'] as TimeFrame[]) {
+      normalizedUserArtists[timeFrame] = userTopArtists[timeFrame].map((artist, index) => ({
+        name: (artist.name || '').toLowerCase(),
+        id: artist.id,
+        rank: index + 1,
+        timeFrame
+      }));
+    }
+    const normalizedSavedTracks: NormalizedTrack[] = userSavedTracks.map(track => ({
+      name: (track.name || '').toLowerCase(),
+      artist: (track.artists?.[0]?.name || '').toLowerCase(),
+      spotifyId: track.id
+    }));
+    const savedTracksMap = new Map<string, boolean>();
+    normalizedSavedTracks.forEach(track => {
+      if (track.name && track.artist) {
+        savedTracksMap.set(`${track.name}|${track.artist}`, true);
+      }
+      if (track.spotifyId) {
+        savedTracksMap.set(track.spotifyId, true);
+      }
+    });
+
+    // Create a map of artists that the user has liked songs from
+    const artistsWithLikedSongs = new Set<string>();
+    normalizedSavedTracks.forEach(track => {
+      if (track.artist) {
+        artistsWithLikedSongs.add(track.artist);
+      }
+    });
+
+    // Calculate match scores for valid players
+    const playersWithScores: PlayerWithScore[] = validPlayers.map(player => {
+      if (!player.walkupSong || !player.walkupSong.songName || !player.walkupSong.artistName) {
+        return {
+          player,
+          matchScore: 0,
+          originalMatchScore: 0,
+          matchReason: 'Invalid walkup song data',
+          rankInfo: '',
+          matchingSongs: []
+        };
+      }
+      const normalizedPlayerSong = {
+        name: player.walkupSong.songName.toLowerCase(),
+        artist: player.walkupSong.artistName.toLowerCase(),
+        spotifyId: player.walkupSong.spotifyId || '',
+        genres: (player.walkupSong.genre || []).map(g => g.toLowerCase())
+      };
+      
+      // First check if this is a liked song - highest priority
+      const isLikedSong = this.checkIfLikedSong(normalizedPlayerSong, savedTracksMap);
+      
+      // Find song and artist matches
+      const songMatches = this.findAllSongMatches(normalizedPlayerSong, normalizedUserTracks, normalizedSavedTracks);
+      const artistMatches = this.findAllArtistMatches(normalizedPlayerSong, normalizedUserTracks, normalizedUserArtists, savedTracksMap);
+      
+      // Calculate genre match with user's genre distribution
+      const genreMatch = this.calculateGenreMatchScore(
+        userTopGenres, 
+        normalizedPlayerSong.genres,
+        normalizedPlayerSong.artist,
+        artistsWithLikedSongs
+      );
+      
+      // Compile all match reasons
+      const matchingReasons = new Map<string, MatchResult>();
+      
+      // Add liked song match if applicable
+      if (isLikedSong) {
+        matchingReasons.set('liked', { 
+          score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG, 
+          reason: 'Liked song' 
+        });
+      }
+      
+      // Add song matches
+      songMatches.forEach(match => {
+        const key = `song-${match.score}-${match.timeFrame || 'saved'}`;
+        if (!matchingReasons.has(key) || match.score > (matchingReasons.get(key)?.score || 0)) {
+          matchingReasons.set(key, match);
+        }
+      });
+      
+      // Add artist matches
+      artistMatches.forEach(match => {
+        const key = `artist-${match.score}-${match.timeFrame || 'unknown'}`;
+        if (!matchingReasons.has(key) || match.score > (matchingReasons.get(key)?.score || 0)) {
+          matchingReasons.set(key, match);
+        }
+      });
+      
+      // Add genre match if it exists
+      if (genreMatch.score > 0) {
+        matchingReasons.set('genre', genreMatch);
+      }
+      
+      // Sort matches by score and take the best one
+      const sortedMatches = Array.from(matchingReasons.values()).sort((a, b) => b.score - a.score);
+      const bestMatch = sortedMatches[0] || { score: 0, reason: 'No match found', details: '' };
+      
+      // CHANGED: Check if the specific track is in liked tracks for non-song matches
+      // If this is not already a liked song or top song match, check if it's in liked tracks
+      if (bestMatch.reason !== 'Liked song' && bestMatch.reason !== 'Top song' && 
+          this.checkIfLikedSong(normalizedPlayerSong, savedTracksMap)) {
+        // Upgrade to a liked song match
+        bestMatch.score = this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG;
+        bestMatch.reason = 'Liked song';
+      }
+      
+      let finalScore = bestMatch.score;
+
+      // Add stats bonus (very small to not override music preferences)
+      const STATS_BONUS_WEIGHT = 0.01; // 1% bonus at most
+      let statsBonus = 0;
+      
+      if (player.position !== 'P') {
+        // For non-pitchers, use OPS (On-base Plus Slugging)
+        const ops = (player.stats?.batting?.onBasePercentage || 0) + (player.stats?.batting?.sluggingPercentage || 0);
+        // Normalize OPS (typical range is 0.500 to 1.000)
+        statsBonus = ((ops - 0.500) / 0.500) * STATS_BONUS_WEIGHT;
+      } else {
+        // For pitchers, use ERA (lower is better)
+        const era = player.stats?.pitching?.earnedRunAvg || 0;
+        if (era > 0) {
+          // Normalize ERA (typical range is 1.00 to 6.00)
+          statsBonus = ((6.00 - era) / 5.00) * STATS_BONUS_WEIGHT;
+        }
+      }
+      
+      // Ensure stats bonus is between 0 and STATS_BONUS_WEIGHT
+      statsBonus = Math.max(0, Math.min(statsBonus, STATS_BONUS_WEIGHT));
+      
+      // Add bonus for multiple matches
+      if (sortedMatches.length > 1) {
+        finalScore *= (1 + this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS);
+      }
+      
+      // Add stats bonus
+      finalScore += statsBonus;
+      
+      console.log(`Player: ${player.playerName}, Initial Score: ${bestMatch.score.toFixed(2)}, Stats Bonus: ${statsBonus.toFixed(4)}, Final Score: ${finalScore.toFixed(2)}`);
+      return {
+        player,
+        matchScore: finalScore,
+        originalMatchScore: finalScore,
+        matchReason: bestMatch.reason,
+        rankInfo: bestMatch.details || '',
+        matchingSongs: [{
+          songName: player.walkupSong.songName,
+          artistName: player.walkupSong.artistName,
+          matchScore: bestMatch.score,
+          matchReason: bestMatch.reason,
+          rankInfo: bestMatch.details || '',
+          albumArt: player.walkupSong.albumArt || '',
+          previewUrl: player.walkupSong.previewUrl || undefined
+        }]
+      };
+    }).filter(p => p.matchScore >= this.MIN_MATCH_SCORE)
+      .sort((a, b) => b.matchScore - a.matchScore);
+
+    console.log(`Found ${playersWithScores.length} players with match scores above threshold (phase 1)`);
+
+    // ----- FIRST PASS: Greedy Assignment with Uniqueness -----
+    // Now store assignments as objects containing candidate and the assigned slot.
+    const team: { [position: string]: TeamAssignment } = {};
+    const usedCandidateIds = new Set<string>();
+    const usedSongNames = new Set<string>();
+
+    for (const pos of positions) {
+      const eligible = playersWithScores.filter(candidate =>
+        this.isCandidateEligibleForPosition(candidate, pos) &&
+        !usedCandidateIds.has(candidate.player.playerId) &&
+        !usedSongNames.has(candidate.player.walkupSong.songName)
+      );
+      if (eligible.length > 0) {
+        team[pos] = { candidate: eligible[0], assignedPosition: pos };
+        usedCandidateIds.add(eligible[0].player.playerId);
+        usedSongNames.add(eligible[0].player.walkupSong.songName);
+      } else {
+        console.warn(`No eligible candidate for position ${pos}`);
+      }
+    }
+
+    // ----- SECOND PASS: Diversity Adjustment for Artists -----
+    // Build an artist map from the current team.
+    const artistMap: { [artist: string]: Array<{ position: Position; assignment: TeamAssignment }> } = {};
+    for (const pos of positions) {
+      const assignment = team[pos];
+      if (!assignment) continue;
+      const artist = assignment.candidate.player.walkupSong.artistName;
+      if (!artistMap[artist]) {
+        artistMap[artist] = [];
+      }
+      artistMap[artist].push({ position: pos, assignment });
+    }
+    // For any artist with duplicates, try to swap out lower-ranked ones.
+    for (const artist in artistMap) {
+      if (artistMap[artist].length > 1) {
+        artistMap[artist].sort((a, b) => b.assignment.candidate.matchScore - a.assignment.candidate.matchScore);
+        for (let i = 1; i < artistMap[artist].length; i++) {
+          const { position, assignment } = artistMap[artist][i];
+          let penaltyRate = 0;
+          if (i === 1) penaltyRate = this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.SECOND;
+          else if (i === 2) penaltyRate = this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.THIRD;
+          else if (i === 3) penaltyRate = this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.FOURTH;
+          else penaltyRate = this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.FIFTH_PLUS;
+          const currentEffective = assignment.candidate.originalMatchScore * (1 - penaltyRate);
+          // Look for alternatives whose artist is different and update the assigned position to this slot.
+          const alternatives = playersWithScores.filter(c =>
+            this.isCandidateEligibleForPosition(c, position) &&
+            !usedCandidateIds.has(c.player.playerId) &&
+            c.player.walkupSong.artistName !== artist
+          );
+          let bestAltEffective = 0;
+          let bestAlternative: PlayerWithScore | null = null;
+          for (const alt of alternatives) {
+            const altArtist = alt.player.walkupSong.artistName;
+            const altOccurrences = this.getArtistCountInTeam(altArtist, team);
+            const altPenalty = this.computePenaltyMultiplier(altOccurrences);
+            const altEffective = alt.originalMatchScore * (1 - altPenalty);
+            if (altEffective > bestAltEffective) {
+              bestAltEffective = altEffective;
+              bestAlternative = alt;
+            }
+          }
+          if (bestAlternative && bestAltEffective > currentEffective) {
+            console.log(`Swapping position ${position}: replacing ${assignment.candidate.player.playerName} (${artist}, effective ${currentEffective.toFixed(2)}) with ${bestAlternative.player.playerName} (${bestAlternative.player.walkupSong.artistName}, effective ${bestAltEffective.toFixed(2)})`);
+            team[position] = { candidate: bestAlternative, assignedPosition: position };
+            usedCandidateIds.add(bestAlternative.player.playerId);
+            usedSongNames.add(bestAlternative.player.walkupSong.songName);
+          }
+        }
+      }
+    }
+
+    // ----- THIRD PASS: Song Uniqueness Adjustment -----
+    const songMap: { [song: string]: Array<{ position: Position; assignment: TeamAssignment }> } = {};
+    for (const pos of positions) {
+      const assignment = team[pos];
+      if (!assignment) continue;
+      const song = assignment.candidate.player.walkupSong.songName;
+      if (!songMap[song]) songMap[song] = [];
+      songMap[song].push({ position: pos, assignment });
+    }
+    for (const song in songMap) {
+      if (songMap[song].length > 1) {
+        songMap[song].sort((a, b) => b.assignment.candidate.matchScore - a.assignment.candidate.matchScore);
+        for (let i = 1; i < songMap[song].length; i++) {
+          const { position } = songMap[song][i];
+          const alternatives = playersWithScores.filter(c =>
+            this.isCandidateEligibleForPosition(c, position) &&
+            !usedCandidateIds.has(c.player.playerId) &&
+            c.player.walkupSong.songName !== song
+          );
+          if (alternatives.length > 0) {
+            const alternative = alternatives[0];
+            console.log(`Replacing duplicate song at ${position}: "${song}" replaced with "${alternative.player.walkupSong.songName}"`);
+            team[position] = { candidate: alternative, assignedPosition: position };
+            usedCandidateIds.add(alternative.player.playerId);
+            usedSongNames.add(alternative.player.walkupSong.songName);
+          }
+        }
+      }
+    }
+
+    // Build final team array (using the assigned positions from our TeamAssignment objects)
+    const finalTeam: PlayerWalkupSong[] = positions
+      .map(pos => team[pos])
+      .filter(Boolean)
+      .map(assignment => this.createTeamPlayer(assignment.candidate, assignment.assignedPosition, assignment.candidate.matchScore));
+    return finalTeam;
+  }
+
+  /**
+   * Create a team player object using the candidate and the assigned position.
+   */
+  private createTeamPlayer(
+    candidate: PlayerWithScore,
+    assignedPosition: Position,
+    adjustedScore: number
+  ): PlayerWalkupSong {
+    return {
+      ...candidate.player,
+      position: assignedPosition,
+      matchReason: candidate.matchReason,
+      rankInfo: candidate.rankInfo,
+      matchScore: adjustedScore,
+      matchingSongs: candidate.matchingSongs?.map(song => ({
+        ...song,
+        albumArt: song.albumArt || candidate.player.walkupSong.albumArt || '',
+        previewUrl: song.previewUrl || candidate.player.walkupSong.previewUrl || undefined
+      }))
+    };
+  }
+
+  /**
+   * Determines if a candidate is eligible for a given position.
+   * Special handling for pitcher positions and DH.
+   */
+  private isCandidateEligibleForPosition(candidate: PlayerWithScore, position: Position): boolean {
+    if (['SP', 'P1', 'P2', 'P3', 'P4', 'P'].includes(position as string)) {
+      return candidate.player.position === 'P' || candidate.player.position === 'SP';
+    } else if (position === 'DH') {
+      const fallbackDH = this.FALLBACK_POSITIONS['DH'] || [];
+      return candidate.player.position === 'DH' || fallbackDH.includes(candidate.player.position) ||
+             (this.SIMILAR_POSITIONS['DH'] || []).includes(candidate.player.position);
     } else {
-      matchReason = 'Based on your music taste';
+      if (candidate.player.position === position) return true;
+      const compatible = this.COMPATIBLE_POSITIONS[position as string] || [];
+      const similar = this.SIMILAR_POSITIONS[position as string] || [];
+      return compatible.includes(candidate.player.position) || similar.includes(candidate.player.position);
+    }
+  }
+
+  /**
+   * Helper: Count how many times a given artist appears in the team.
+   */
+  private getArtistCountInTeam(artist: string, team: { [position: string]: TeamAssignment }): number {
+    let count = 0;
+    for (const pos in team) {
+      if (team[pos].candidate.player.walkupSong.artistName === artist) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Compute penalty multiplier based on occurrence index (0-indexed).
+   */
+  private computePenaltyMultiplier(index: number): number {
+    if (index === 0) return 0.0;
+    if (index === 1) return this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.SECOND;
+    if (index === 2) return this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.THIRD;
+    if (index === 3) return this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.FOURTH;
+    return this.SCORE_WEIGHTS.ARTIST_DIVERSITY_PENALTY.FIFTH_PLUS;
+  }
+
+  /**
+   * Find all possible song matches for a player.
+   */
+  private findAllSongMatches(
+    playerSong: { name: string; artist: string; genres: string[] },
+    userTracks: Record<TimeFrame, NormalizedTrack[]>,
+    userSavedTracks: NormalizedTrack[]
+  ): MatchResult[] {
+    const matches: MatchResult[] = [];
+    const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
+    for (const timeFrame of timeFrames) {
+      const tracks = userTracks[timeFrame];
+      const matchedTrack = tracks.find(track => track.name === playerSong.name && track.artist === playerSong.artist);
+      if (matchedTrack) {
+        const rank = matchedTrack.rank || 0;
+        const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+        let rankBonus = 0;
+        if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
+        else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
+        else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+        const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_SONG + timeFrameBonus + rankBonus;
+        const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
+        matches.push({ score, reason: 'Top song', details, rank, timeFrame });
+      }
+    }
+    const savedMatch = userSavedTracks.find(track => track.name === playerSong.name && track.artist === playerSong.artist);
+    if (savedMatch) {
+      matches.push({ score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG, reason: 'Liked song' });
+    }
+    for (const timeFrame of timeFrames) {
+      const tracks = userTracks[timeFrame];
+      const partialMatches = tracks.filter(track => track.name === playerSong.name && track.artist !== playerSong.artist);
+      if (partialMatches.length > 0) {
+        const bestPartial = partialMatches.reduce((best, current) =>
+          (current.rank || Infinity) < (best.rank || Infinity) ? current : best, partialMatches[0]);
+        const rank = bestPartial.rank || 0;
+        matches.push({
+          score: this.SCORE_WEIGHTS.MATCH_TYPE.PARTIAL_SONG,
+          reason: 'Partial song match (same title)',
+          details: rank ? `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}` : '',
+          rank,
+          timeFrame
+        });
+      }
+    }
+    return matches;
+  }
+
+  /**
+   * Find all possible artist matches for a player.
+   */
+  private findAllArtistMatches(
+    playerSong: { name: string; artist: string; spotifyId?: string },
+    userTracks: Record<TimeFrame, NormalizedTrack[]>,
+    userArtists: Record<TimeFrame, NormalizedArtist[]>,
+    savedTracksMap: Map<string, boolean>
+  ): MatchResult[] {
+    const matches: MatchResult[] = [];
+    const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
+    
+    for (const timeFrame of timeFrames) {
+      const artists = userArtists[timeFrame];
+      const matchedArtist = artists.find(artist => artist.name && playerSong.artist && artist.name === playerSong.artist);
+      
+      if (matchedArtist) {
+        // Regular artist match scoring
+        const rank = matchedArtist.rank || 0;
+        const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+        let rankBonus = 0;
+        if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
+        else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
+        else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+        const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
+        const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
+        const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
+        matches.push({ score, reason: 'Top artist', details, rank, timeFrame });
+      }
     }
     
-    return { matchScore, matchReason, matchedGenres: matchedGenreNames };
+    // Handle partial artist matches
+    for (const timeFrame of timeFrames) {
+      const artists = userArtists[timeFrame];
+      const partialMatches = artists.filter(artist =>
+        artist.name && playerSong.artist &&
+        artist.name !== playerSong.artist &&
+        (artist.name.includes(playerSong.artist) || playerSong.artist.includes(artist.name))
+      );
+      if (partialMatches.length > 0) {
+        const bestPartial = partialMatches.reduce((best, current) =>
+          (current.rank || Infinity) < (best.rank || Infinity) ? current : best, partialMatches[0]);
+        const rank = bestPartial.rank || 0;
+        matches.push({
+          score: this.SCORE_WEIGHTS.MATCH_TYPE.PARTIAL_ARTIST,
+          reason: 'Partial artist match',
+          details: rank ? `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}` : '',
+          rank,
+          timeFrame
+        });
+      }
+    }
+    return matches;
   }
-  
+
   /**
-   * Check if two genres are similar enough to be considered a match
+   * Calculate match score between user genres and player song genres.
+   * Enhanced to match against user's genre distribution pattern.
+   * Now also checks if the user has liked any songs by this artist to give a small boost.
+   */
+  private calculateGenreMatchScore(
+    userGenres: Array<{ name: string; weight: number }>, 
+    playerGenres: string[],
+    playerArtist: string,
+    artistsWithLikedSongs: Set<string>
+  ): MatchResult {
+    if (!playerGenres || playerGenres.length === 0) {
+      return { score: 0, reason: 'No genre data available' };
+    }
+    
+    // Find all matching genres
+    const matches = userGenres
+      .filter(userGenre =>
+        playerGenres.some(playerGenre => this.areGenresSimilar(playerGenre, userGenre.name))
+      )
+      .map(match => ({ name: match.name, weight: match.weight }));
+    
+    if (matches.length === 0) {
+      return { score: 0, reason: 'No genre matches' };
+    }
+    
+    // Calculate base score using total weight from user's genre distribution
+    const totalWeight = userGenres.reduce((sum, g) => sum + g.weight, 0);
+    const matchWeight = matches.reduce((sum, m) => sum + m.weight, 0);
+    
+    // Calculate match score based on proportion of user's genre profile
+    const matchScore = matchWeight / totalWeight;
+    
+    // Add a bonus for matching the user's top genres
+    let topGenreBonus = 0;
+    const userTopGenres = userGenres.slice(0, 3); // User's top 3 genres
+    const matchesTopGenres = matches.filter(m => 
+      userTopGenres.some(tg => tg.name === m.name)
+    );
+    
+    if (matchesTopGenres.length > 0) {
+      // Bonus scales with how many top genres match and their weights
+      const topGenreMatchWeight = matchesTopGenres.reduce((sum, m) => sum + m.weight, 0);
+      const topGenreTotalWeight = userTopGenres.reduce((sum, g) => sum + g.weight, 0);
+      topGenreBonus = 0.1 * (topGenreMatchWeight / topGenreTotalWeight);
+    }
+    
+    // Calculate diversity ratio - how well the player's genre diversity 
+    // matches the user's genre diversity
+    const userGenreDiversity = Math.min(userGenres.length, 10) / 10; // Normalized to 0-1
+    const playerGenreDiversity = Math.min(playerGenres.length, 10) / 10; // Normalized to 0-1
+    const diversityMatchRatio = 1 - Math.abs(userGenreDiversity - playerGenreDiversity);
+    const diversityBonus = 0.05 * diversityMatchRatio;
+    
+    // NEW: Check if the user has liked any songs by this artist
+    let artistLikedBonus = 0;
+    if (artistsWithLikedSongs.has(playerArtist)) {
+      artistLikedBonus = this.SCORE_WEIGHTS.GENRE_ARTIST_LIKED_BONUS;
+    }
+    
+    // Calculate final score with all components
+    const score = (matchScore * this.SCORE_WEIGHTS.MATCH_TYPE.GENRE) + 
+                 topGenreBonus + 
+                 diversityBonus + 
+                 artistLikedBonus;
+    
+    // Create appropriate reason text
+    let reason = '';
+    if (matchScore >= 0.8) reason = `Strong genre match`;
+    else if (matchScore >= 0.5) reason = `Good genre match`;
+    else if (matchScore >= 0.3) reason = `Partial genre match`;
+    else reason = `Minor genre match`;
+    
+    if (artistLikedBonus > 0) {
+      reason += ' (artist in liked songs)';
+    }
+    
+    // Add details about matching genres
+    const details = matches.map(m => m.name).slice(0, 2).join(', ');
+    
+    return { score, reason, details };
+  }
+
+  /**
+   * Check if two genres are similar.
    */
   private areGenresSimilar(genre1: string, genre2: string): boolean {
-    // Direct match
-    if (genre1 === genre2) return true;
-    
-    // Check if one genre contains the other
-    if (genre1.includes(genre2) || genre2.includes(genre1)) return true;
-    
-    // Handle common variations
-    const variations = {
+    const cacheKey = `${genre1}|${genre2}`;
+    const reverseKey = `${genre2}|${genre1}`;
+    if (this.genreSimilarityCache.has(cacheKey)) return this.genreSimilarityCache.get(cacheKey) as boolean;
+    if (this.genreSimilarityCache.has(reverseKey)) return this.genreSimilarityCache.get(reverseKey) as boolean;
+    if (genre1 === genre2) {
+      this.genreSimilarityCache.set(cacheKey, true);
+      return true;
+    }
+    if (genre1.includes(genre2) || genre2.includes(genre1)) {
+      this.genreSimilarityCache.set(cacheKey, true);
+      return true;
+    }
+    const variations: Record<string, string[]> = {
       'hip hop': ['rap', 'trap', 'drill', 'hiphop'],
       'rock': ['metal', 'punk', 'grunge', 'hard rock', 'classic rock', 'alternative rock'],
       'pop': ['dance', 'electronic', 'edm', 'house', 'dance pop'],
@@ -756,48 +1164,49 @@ export class WalkupSongService {
       'latin': ['salsa', 'merengue', 'bachata', 'cumbia'],
       'indie': ['indie pop', 'indie rock', 'alternative']
     };
-    
     for (const [mainGenre, relatedGenres] of Object.entries(variations)) {
-      if (
-        (genre1 === mainGenre && relatedGenres.includes(genre2)) ||
-        (genre2 === mainGenre && relatedGenres.includes(genre1))
-      ) {
+      if ((genre1 === mainGenre && relatedGenres.includes(genre2)) ||
+          (genre2 === mainGenre && relatedGenres.includes(genre1))) {
+        this.genreSimilarityCache.set(cacheKey, true);
         return true;
       }
     }
-    
+    this.genreSimilarityCache.set(cacheKey, false);
     return false;
   }
 
   /**
-   * Increment the count of used songs for an artist
+   * Calculate a bonus for genre variety.
    */
-  private incrementArtistCount(artistName: string): void {
-    const currentCount = this.usedArtists.get(artistName) || 0;
-    this.usedArtists.set(artistName, currentCount + 1);
+  private calculateGenreVarietyBonus(playerGenres: string[]): number {
+    if (!playerGenres || playerGenres.length === 0) return 0;
+    const uniqueGenres = new Set(playerGenres.map(g => g.toLowerCase()));
+    const genreCount = Math.min(uniqueGenres.size, 5);
+    const varietyBonus = genreCount * 0.02;
+    return Math.min(varietyBonus, this.SCORE_WEIGHTS.GENRE_VARIETY_BONUS);
   }
 
   /**
-   * Get the ordinal suffix for a number (1st, 2nd, 3rd, etc.)
+   * Get a label for a given time frame.
    */
-  private getOrdinalSuffix(n: number): string {
-    const j = n % 10;
-    const k = n % 100;
-    if (j === 1 && k !== 11) return 'st';
-    if (j === 2 && k !== 12) return 'nd';
-    if (j === 3 && k !== 13) return 'rd';
-    return 'th';
-  }
-
-  /**
-   * Get time frame label
-   */
-  private getTimeFrameLabel(timeFrame: 'short_term' | 'medium_term' | 'long_term'): string {
+  private getTimeFrameLabel(timeFrame: TimeFrame): string {
     switch (timeFrame) {
       case 'short_term': return 'past 4 weeks';
       case 'medium_term': return 'past 6 months';
       case 'long_term': return 'all time';
       default: return '';
     }
+  }
+
+  /**
+   * Check if a song is in the user's liked tracks.
+   */
+  private checkIfLikedSong(
+    playerSong: { name: string; artist: string; spotifyId?: string },
+    savedTracksMap: Map<string, boolean>
+  ): boolean {
+    if (playerSong.spotifyId && savedTracksMap.has(playerSong.spotifyId)) return true;
+    const key = `${playerSong.name}|${playerSong.artist}`;
+    return savedTracksMap.has(key);
   }
 }

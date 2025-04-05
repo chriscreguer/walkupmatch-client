@@ -2,6 +2,8 @@
  * Core types for walkup song data
  */
 
+import { PlayerStats } from '../mlb/types';
+
 export interface WalkupSong {
     id: string;
     songName: string;
@@ -11,6 +13,7 @@ export interface WalkupSong {
     youtubeId?: string;
     genre: string[];
     albumArt?: string;
+    previewUrl?: string | null;
   }
   
   export interface PlayerWalkupSong {
@@ -23,6 +26,16 @@ export interface WalkupSong {
     matchReason?: string;
     rankInfo?: string;
     matchScore?: number;
+    stats?: PlayerStats;
+    matchingSongs?: Array<{
+      songName: string;
+      artistName: string;
+      matchScore: number;
+      matchReason: string;
+      rankInfo: string;
+      albumArt: string;
+      previewUrl?: string | null;
+    }>;
   }
   
   /**

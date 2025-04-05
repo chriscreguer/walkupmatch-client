@@ -8,21 +8,20 @@ interface BaseballDiamondProps {
 
 // Positions based on standard baseball field positioning
 const POSITIONS: Record<string, { x: number, y: number, anchor: 'left' | 'center' | 'right' }> = {
-  'SP': { x: 244, y: 130, anchor: 'center' },   // Pitcher's mound (center of infield)
-  'C': { x: 254, y: 210, anchor: 'center' },    // Catcher (behind home plate)
-  '1B': { x: 460, y: 130, anchor: 'right' },    // First baseman (near first base)
-  '2B': { x: 370, y: 90, anchor: 'right' },    // Second baseman (right of second base)
-  '3B': { x: 40, y: 120, anchor: 'left' },     // Third baseman (near third base)
-  'SS': { x: 104, y: 90, anchor: 'left' },     // Shortstop (left of second base)
-  'LF': { x: 60, y: 40, anchor: 'left' },      // Left fielder (left outfield)
-  'CF': { x: 244, y: 10, anchor: 'center' },    // Center fielder (center outfield)
-  'RF': { x: 438, y: 40, anchor: 'right' },     // Right fielder (right outfield)
-  'DH': { x: 400, y: 190, anchor: 'right' },    // Designated hitter (dugout area)
-  'RP': { x: 30, y: 160, anchor: 'left' },      // Relief pitchers (bullpen area)
-  'RP2': { x: 30, y: 180, anchor: 'left' },     // Relief pitcher 2
-  'RP3': { x: 30, y: 200, anchor: 'left' },     // Relief pitcher 3
-  'RP4': { x: 30, y: 220, anchor: 'left' },     // Relief pitcher 4
-  'RP5': { x: 30, y: 240, anchor: 'left' }, 
+  'SP': { x: 244, y: 130, anchor: 'center' },   // Starting pitcher (mound)
+  'C': { x: 254, y: 210, anchor: 'center' },    // Catcher
+  '1B': { x: 460, y: 130, anchor: 'right' },    // First base
+  '2B': { x: 370, y: 90, anchor: 'right' },     // Second base
+  '3B': { x: 40, y: 120, anchor: 'left' },      // Third base
+  'SS': { x: 104, y: 90, anchor: 'left' },      // Shortstop
+  'LF': { x: 60, y: 40, anchor: 'left' },       // Left field
+  'CF': { x: 244, y: 10, anchor: 'center' },    // Center field
+  'RF': { x: 438, y: 40, anchor: 'right' },     // Right field
+  'DH': { x: 400, y: 190, anchor: 'right' },    // Designated hitter
+  'P1': { x: 30, y: 160, anchor: 'left' },      // Relief pitcher 1
+  'P2': { x: 30, y: 180, anchor: 'left' },      // Relief pitcher 2
+  'P3': { x: 30, y: 200, anchor: 'left' },      // Relief pitcher 3
+  'P4': { x: 30, y: 220, anchor: 'left' },      // Relief pitcher 4
 };
 
 // Helper to find a player by position
