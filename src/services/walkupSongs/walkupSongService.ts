@@ -82,6 +82,8 @@ interface NormalizedTrack {
   name: string;
   artist: string;
   spotifyId?: string;
+  albumId?: string;
+  albumName?: string;
   rank?: number;
   timeFrame?: TimeFrame;
 }
@@ -91,6 +93,12 @@ interface NormalizedArtist {
   id?: string;
   rank?: number;
   timeFrame?: TimeFrame;
+}
+
+interface NormalizedAlbum {
+  id: string;
+  name: string;
+  artistName: string;
 }
 
 interface MatchResult {
@@ -107,6 +115,7 @@ interface PlayerWithScore {
   originalMatchScore: number;
   matchReason: string;
   rankInfo: string;
+  savedAlbumMatch?: boolean; // New field to track album matches
   matchingSongs: Array<{
     songName: string;
     artistName: string;
@@ -214,11 +223,10 @@ export class WalkupSongService {
       TOP_50: 0
     },
     MATCH_TYPE: {
-      LIKED_SONG: 1.2, // Changed from 1.5 to 1.2
-      TOP_SONG: 1.5,   // Changed from 1.0 to 1.5
+      LIKED_SONG: 1.2,
+      TOP_SONG: 1.5,
       TOP_ARTIST: 0.8,
-      PARTIAL_SONG: 0.2, // Changed from 0.6 to 0.2
-      PARTIAL_ARTIST: 0.2, // Changed from 0.5 to 0.2
+      FEATURE: 0.6, // Feature match type (between artist and genre)
       GENRE: 0.4
     },
     // Penalty for duplicate artist occurrences:
@@ -229,10 +237,14 @@ export class WalkupSongService {
       FOURTH: 0.7,
       FIFTH_PLUS: 0.8
     },
-    MULTIPLE_MATCHES_BONUS: 0.1,
+    MULTIPLE_MATCHES_BONUS: 0.03, // Bonus for multiple match reasons
     GENRE_VARIETY_BONUS: 0.15,
     // Small bonus for genre matches where user has liked songs by the artist
-    GENRE_ARTIST_LIKED_BONUS: 0.05
+    GENRE_ARTIST_LIKED_BONUS: 0.05,
+    // New: Bonus for exact genre match (vs similar genre)
+    EXACT_GENRE_MATCH_BONUS: 0.05,
+    // New: Very small bonus for saved album tie-breaker
+    SAVED_ALBUM_BONUS: 0.02
   };
 
   private constructor() {
@@ -553,7 +565,8 @@ export class WalkupSongService {
     userTopTracks: { short_term: SpotifyTopItem[]; medium_term: SpotifyTopItem[]; long_term: SpotifyTopItem[] },
     userTopArtists: { short_term: SpotifyTopItem[]; medium_term: SpotifyTopItem[]; long_term: SpotifyTopItem[] },
     userSavedTracks: SpotifyTopItem[],
-    positions: Position[]
+    positions: Position[],
+    userSavedAlbums: SpotifyTopItem[] = [] // New parameter for saved albums
   ): Promise<PlayerWalkupSong[]> {
     // Reset caches
     this.usedSongs.clear();
@@ -606,6 +619,8 @@ export class WalkupSongService {
         name: (track.name || '').toLowerCase(),
         artist: (track.artists?.[0]?.name || '').toLowerCase(),
         spotifyId: track.id,
+        albumId: track.album?.id,
+        albumName: track.album?.name || '',
         rank: index + 1,
         timeFrame
       }));
@@ -622,7 +637,9 @@ export class WalkupSongService {
     const normalizedSavedTracks: NormalizedTrack[] = userSavedTracks.map(track => ({
       name: (track.name || '').toLowerCase(),
       artist: (track.artists?.[0]?.name || '').toLowerCase(),
-      spotifyId: track.id
+      spotifyId: track.id,
+      albumId: track.album?.id,
+      albumName: track.album?.name || ''
     }));
     const savedTracksMap = new Map<string, boolean>();
     normalizedSavedTracks.forEach(track => {
@@ -639,6 +656,20 @@ export class WalkupSongService {
     normalizedSavedTracks.forEach(track => {
       if (track.artist) {
         artistsWithLikedSongs.add(track.artist);
+      }
+    });
+
+    // NEW: Create a map of artists with saved albums
+    const normalizedSavedAlbums: NormalizedAlbum[] = userSavedAlbums.map(album => ({
+      id: album.id || '',
+      name: (album.name || '').toLowerCase(),
+      artistName: (album.artists?.[0]?.name || '').toLowerCase()
+    }));
+    
+    const artistsWithSavedAlbums = new Set<string>();
+    normalizedSavedAlbums.forEach(album => {
+      if (album.artistName) {
+        artistsWithSavedAlbums.add(album.artistName);
       }
     });
 
@@ -721,8 +752,23 @@ export class WalkupSongService {
         bestMatch.reason = 'Liked song';
       }
       
-      let finalScore = bestMatch.score;
+      // Calculate base player score (highest match score)
+      let basePlayerScore = bestMatch.score;
+      
+      // Add a bonus for multiple match reasons
+      if (sortedMatches.length > 1) {
+        // Count the number of additional match reasons
+        const additionalMatchCount = sortedMatches.length - 1;
+        // Add a small boost per additional match reason
+        basePlayerScore += additionalMatchCount * this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS;
+      }
 
+      // NEW: Check if player's artist has saved albums
+      const hasArtistWithSavedAlbum = this.checkArtistHasSavedAlbum(
+        player.walkupSong.artistName.toLowerCase(),
+        artistsWithSavedAlbums
+      );
+      
       // Add stats bonus (very small to not override music preferences)
       const STATS_BONUS_WEIGHT = 0.01; // 1% bonus at most
       let statsBonus = 0;
@@ -744,30 +790,34 @@ export class WalkupSongService {
       // Ensure stats bonus is between 0 and STATS_BONUS_WEIGHT
       statsBonus = Math.max(0, Math.min(statsBonus, STATS_BONUS_WEIGHT));
       
-      // Add bonus for multiple matches
-      if (sortedMatches.length > 1) {
-        finalScore *= (1 + this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS);
-      }
+      // Calculate final player score (base score + stats bonus)
+      const finalPlayerScore = basePlayerScore + statsBonus;
       
-      // Add stats bonus
-      finalScore += statsBonus;
-      
-      console.log(`Player: ${player.playerName}, Initial Score: ${bestMatch.score.toFixed(2)}, Stats Bonus: ${statsBonus.toFixed(4)}, Final Score: ${finalScore.toFixed(2)}`);
-      return {
-        player,
-        matchScore: finalScore,
-        originalMatchScore: finalScore,
+      // Create matching songs array with individual song scores
+      // Only include the best match for each unique song
+      const matchingSongs = [{
+        songName: player.walkupSong.songName,
+        artistName: player.walkupSong.artistName,
+        matchScore: bestMatch.score,
         matchReason: bestMatch.reason,
         rankInfo: bestMatch.details || '',
-        matchingSongs: [{
-          songName: player.walkupSong.songName,
-          artistName: player.walkupSong.artistName,
-          matchScore: bestMatch.score,
-          matchReason: bestMatch.reason,
-          rankInfo: bestMatch.details || '',
-          albumArt: player.walkupSong.albumArt || '',
-          previewUrl: player.walkupSong.previewUrl || undefined
-        }]
+        albumArt: player.walkupSong.albumArt || '',
+        previewUrl: player.walkupSong.previewUrl || undefined
+      }];
+      
+      // Count how many matches meet the minimum threshold
+      const qualifyingMatches = sortedMatches.filter(match => match.score >= this.MIN_MATCH_SCORE).length;
+      
+      console.log(`Player: ${player.playerName}, Base Score: ${basePlayerScore.toFixed(2)}, Stats Bonus: ${statsBonus.toFixed(4)}, Final Score: ${finalPlayerScore.toFixed(2)}, Qualifying Matches: ${qualifyingMatches}, Saved Album: ${hasArtistWithSavedAlbum}`);
+      
+      return {
+        player,
+        matchScore: finalPlayerScore,
+        originalMatchScore: finalPlayerScore,
+        matchReason: bestMatch.reason,
+        rankInfo: bestMatch.details || '',
+        savedAlbumMatch: hasArtistWithSavedAlbum, // Store saved album match status
+        matchingSongs
       };
     }).filter(p => p.matchScore >= this.MIN_MATCH_SCORE)
       .sort((a, b) => b.matchScore - a.matchScore);
@@ -780,6 +830,48 @@ export class WalkupSongService {
     const usedCandidateIds = new Set<string>();
     const usedSongNames = new Set<string>();
 
+    // Group players by position for position-specific processing
+    const playersByPosition: Record<string, PlayerWithScore[]> = {};
+    
+    // First, organize players by position
+    for (const player of playersWithScores) {
+      const pos = player.player.position;
+      if (!playersByPosition[pos]) {
+        playersByPosition[pos] = [];
+      }
+      playersByPosition[pos].push(player);
+    }
+    
+    // For each position, check if we have a tie between top candidates that can be broken by album match
+    for (const pos in playersByPosition) {
+      const candidates = playersByPosition[pos];
+      if (candidates.length >= 2) {
+        // Sort by score
+        candidates.sort((a, b) => b.matchScore - a.matchScore);
+        
+        // Check if top two candidates have very close scores (consider as tie)
+        if (candidates[0].matchScore > 0 && 
+            candidates[1].matchScore > 0 &&
+            candidates[0].matchScore - candidates[1].matchScore < 0.05 && // Score difference < 0.05
+            candidates[0].matchReason === 'Top artist' && 
+            candidates[1].matchReason === 'Top artist') {
+          
+          // Apply saved album bonus if applicable
+          if (candidates[0].savedAlbumMatch && !candidates[1].savedAlbumMatch) {
+            candidates[0].matchScore += this.SCORE_WEIGHTS.SAVED_ALBUM_BONUS;
+            console.log(`Applied saved album bonus to ${candidates[0].player.playerName} at position ${pos}`);
+          } else if (!candidates[0].savedAlbumMatch && candidates[1].savedAlbumMatch) {
+            candidates[1].matchScore += this.SCORE_WEIGHTS.SAVED_ALBUM_BONUS;
+            console.log(`Applied saved album bonus to ${candidates[1].player.playerName} at position ${pos}`);
+            
+            // Re-sort after bonus
+            candidates.sort((a, b) => b.matchScore - a.matchScore);
+          }
+        }
+      }
+    }
+
+    // Continue with team selection
     for (const pos of positions) {
       const eligible = playersWithScores.filter(candidate =>
         this.isCandidateEligibleForPosition(candidate, pos) &&
@@ -951,6 +1043,23 @@ export class WalkupSongService {
   }
 
   /**
+   * NEW: Check if an artist has any saved albums by the user
+   */
+  private checkArtistHasSavedAlbum(artistName: string, artistsWithSavedAlbums: Set<string>): boolean {
+    // Split artist string by commas to handle multiple artists
+    const artistList = artistName.split(',').map(a => a.trim().toLowerCase());
+    
+    // Check each artist individually
+    for (const artist of artistList) {
+      if (artistsWithSavedAlbums.has(artist)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
    * Find all possible song matches for a player.
    */
   private findAllSongMatches(
@@ -960,41 +1069,46 @@ export class WalkupSongService {
   ): MatchResult[] {
     const matches: MatchResult[] = [];
     const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
+    
+    // Find exact song matches
     for (const timeFrame of timeFrames) {
       const tracks = userTracks[timeFrame];
-      const matchedTrack = tracks.find(track => track.name === playerSong.name && track.artist === playerSong.artist);
-      if (matchedTrack) {
-        const rank = matchedTrack.rank || 0;
-        const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
-        let rankBonus = 0;
-        if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
-        else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
-        else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
-        const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_SONG + timeFrameBonus + rankBonus;
-        const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
-        matches.push({ score, reason: 'Top song', details, rank, timeFrame });
+      // Check for matches with any artist from the player's song
+      const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
+      
+      for (const artistName of artistList) {
+        const matchedTrack = tracks.find(track => 
+          track.name === playerSong.name && track.artist === artistName);
+        
+        if (matchedTrack) {
+          const rank = matchedTrack.rank || 0;
+          const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+          let rankBonus = 0;
+          if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
+          else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
+          else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+          const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_SONG + timeFrameBonus + rankBonus;
+          const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
+          matches.push({ score, reason: 'Top song', details, rank, timeFrame });
+        }
       }
     }
-    const savedMatch = userSavedTracks.find(track => track.name === playerSong.name && track.artist === playerSong.artist);
-    if (savedMatch) {
-      matches.push({ score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG, reason: 'Liked song' });
-    }
-    for (const timeFrame of timeFrames) {
-      const tracks = userTracks[timeFrame];
-      const partialMatches = tracks.filter(track => track.name === playerSong.name && track.artist !== playerSong.artist);
-      if (partialMatches.length > 0) {
-        const bestPartial = partialMatches.reduce((best, current) =>
-          (current.rank || Infinity) < (best.rank || Infinity) ? current : best, partialMatches[0]);
-        const rank = bestPartial.rank || 0;
-        matches.push({
-          score: this.SCORE_WEIGHTS.MATCH_TYPE.PARTIAL_SONG,
-          reason: 'Partial song match (same title)',
-          details: rank ? `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}` : '',
-          rank,
-          timeFrame
+    
+    // Check for song in user's saved tracks
+    const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
+    for (const artistName of artistList) {
+      const savedMatch = userSavedTracks.find(track => 
+        track.name === playerSong.name && track.artist === artistName);
+      
+      if (savedMatch) {
+        matches.push({ 
+          score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG, 
+          reason: 'Liked song' 
         });
+        break; // No need to check other artists if we found a match
       }
     }
+    
     return matches;
   }
 
@@ -1010,46 +1124,96 @@ export class WalkupSongService {
     const matches: MatchResult[] = [];
     const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
     
-    for (const timeFrame of timeFrames) {
-      const artists = userArtists[timeFrame];
-      const matchedArtist = artists.find(artist => artist.name && playerSong.artist && artist.name === playerSong.artist);
-      
-      if (matchedArtist) {
-        // Regular artist match scoring
-        const rank = matchedArtist.rank || 0;
-        const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
-        let rankBonus = 0;
-        if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
-        else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
-        else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
-        const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
-        const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
-        const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
-        matches.push({ score, reason: 'Top artist', details, rank, timeFrame });
+    // Check for feature match in song title first
+    const featureMatches = this.checkForFeatureMatch(playerSong.name, userArtists);
+    if (featureMatches.length > 0) {
+      matches.push(...featureMatches);
+    }
+    
+    // Split artist string by commas to handle multiple artists
+    const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
+    
+    // Check each artist individually
+    for (const artistName of artistList) {
+      for (const timeFrame of timeFrames) {
+        const artists = userArtists[timeFrame];
+        // Find exact artist match
+        const matchedArtist = artists.find(artist => 
+          artist.name && artistName && artist.name === artistName);
+        
+        if (matchedArtist) {
+          // Regular artist match scoring
+          const rank = matchedArtist.rank || 0;
+          const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+          let rankBonus = 0;
+          if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
+          else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
+          else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+          const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
+          const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
+          const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
+          matches.push({ score, reason: 'Top artist', details, rank, timeFrame });
+        }
       }
     }
     
-    // Handle partial artist matches
-    for (const timeFrame of timeFrames) {
-      const artists = userArtists[timeFrame];
-      const partialMatches = artists.filter(artist =>
-        artist.name && playerSong.artist &&
-        artist.name !== playerSong.artist &&
-        (artist.name.includes(playerSong.artist) || playerSong.artist.includes(artist.name))
-      );
-      if (partialMatches.length > 0) {
-        const bestPartial = partialMatches.reduce((best, current) =>
-          (current.rank || Infinity) < (best.rank || Infinity) ? current : best, partialMatches[0]);
-        const rank = bestPartial.rank || 0;
-        matches.push({
-          score: this.SCORE_WEIGHTS.MATCH_TYPE.PARTIAL_ARTIST,
-          reason: 'Partial artist match',
-          details: rank ? `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}` : '',
-          rank,
-          timeFrame
-        });
+    return matches;
+  }
+
+  /**
+   * Check for featured artists in song titles
+   */
+  private checkForFeatureMatch(
+    songTitle: string,
+    userArtists: Record<TimeFrame, NormalizedArtist[]>
+  ): MatchResult[] {
+    const matches: MatchResult[] = [];
+    const featurePatterns = [
+      /\(feat\.\s+([^)]+)\)/i,
+      /\(ft\.\s+([^)]+)\)/i,
+      /\(with\s+([^)]+)\)/i,
+      /feat\.\s+([^,]+)/i,
+      /ft\.\s+([^,]+)/i,
+      /with\s+([^,&]+)/i
+    ];
+    
+    // Extract potential featured artists from song title
+    const featuredArtists: string[] = [];
+    for (const pattern of featurePatterns) {
+      const match = songTitle.match(pattern);
+      if (match && match[1]) {
+        // Handle multiple artists in feature credit
+        const artists = match[1].split(/,|&/).map(a => a.trim().toLowerCase());
+        featuredArtists.push(...artists);
       }
     }
+    
+    if (featuredArtists.length === 0) {
+      return matches;
+    }
+    
+    // Check if any featured artist matches user's top artists
+    const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
+    for (const featuredArtist of featuredArtists) {
+      for (const timeFrame of timeFrames) {
+        const artists = userArtists[timeFrame];
+        const matchedArtist = artists.find(artist => 
+          artist.name && artist.name.toLowerCase() === featuredArtist.toLowerCase());
+        
+        if (matchedArtist) {
+          const rank = matchedArtist.rank || 0;
+          const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+          let rankBonus = 0;
+          if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
+          else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
+          else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+          const score = this.SCORE_WEIGHTS.MATCH_TYPE.FEATURE + timeFrameBonus + rankBonus;
+          const details = `Featured artist #${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
+          matches.push({ score, reason: 'Featured artist', details, rank, timeFrame });
+        }
+      }
+    }
+    
     return matches;
   }
 
@@ -1068,28 +1232,53 @@ export class WalkupSongService {
       return { score: 0, reason: 'No genre data available' };
     }
     
-    // Find all matching genres
-    const matches = userGenres
-      .filter(userGenre =>
-        playerGenres.some(playerGenre => this.areGenresSimilar(playerGenre, userGenre.name))
-      )
-      .map(match => ({ name: match.name, weight: match.weight }));
+    // Find all matching genres, distinguishing between exact and similar matches
+    const exactMatches: Array<{ name: string; weight: number }> = [];
+    const similarMatches: Array<{ name: string; weight: number }> = [];
     
-    if (matches.length === 0) {
+    // Process each user genre to find both exact and similar matches
+    userGenres.forEach(userGenre => {
+      // Check for exact match first
+      const hasExactMatch = playerGenres.some(
+        playerGenre => playerGenre.toLowerCase() === userGenre.name.toLowerCase()
+      );
+      
+      if (hasExactMatch) {
+        exactMatches.push(userGenre);
+      } else {
+        // If no exact match, check for similar genre
+        const hasSimilarMatch = playerGenres.some(
+          playerGenre => this.areGenresSimilar(playerGenre, userGenre.name)
+        );
+        
+        if (hasSimilarMatch) {
+          similarMatches.push(userGenre);
+        }
+      }
+    });
+    
+    // Combine matches, but give a boost to exact matches
+    const allMatches = [
+      ...exactMatches.map(m => ({ ...m, isExact: true })),
+      ...similarMatches.map(m => ({ ...m, isExact: false }))
+    ];
+    
+    if (allMatches.length === 0) {
       return { score: 0, reason: 'No genre matches' };
     }
     
     // Calculate base score using total weight from user's genre distribution
     const totalWeight = userGenres.reduce((sum, g) => sum + g.weight, 0);
-    const matchWeight = matches.reduce((sum, m) => sum + m.weight, 0);
+    const exactMatchWeight = exactMatches.reduce((sum, m) => sum + m.weight, 0);
+    const similarMatchWeight = similarMatches.reduce((sum, m) => sum + m.weight, 0);
     
-    // Calculate match score based on proportion of user's genre profile
-    const matchScore = matchWeight / totalWeight;
+    // Give more weight to exact matches in the score calculation
+    const weightedMatchScore = (exactMatchWeight * (1 + this.SCORE_WEIGHTS.EXACT_GENRE_MATCH_BONUS) + similarMatchWeight) / totalWeight;
     
     // Add a bonus for matching the user's top genres
     let topGenreBonus = 0;
     const userTopGenres = userGenres.slice(0, 3); // User's top 3 genres
-    const matchesTopGenres = matches.filter(m => 
+    const matchesTopGenres = allMatches.filter(m => 
       userTopGenres.some(tg => tg.name === m.name)
     );
     
@@ -1098,6 +1287,12 @@ export class WalkupSongService {
       const topGenreMatchWeight = matchesTopGenres.reduce((sum, m) => sum + m.weight, 0);
       const topGenreTotalWeight = userTopGenres.reduce((sum, g) => sum + g.weight, 0);
       topGenreBonus = 0.1 * (topGenreMatchWeight / topGenreTotalWeight);
+      
+      // Give extra bonus for exact top genre matches
+      const exactTopMatches = matchesTopGenres.filter(m => m.isExact);
+      if (exactTopMatches.length > 0) {
+        topGenreBonus += 0.05 * (exactTopMatches.length / matchesTopGenres.length);
+      }
     }
     
     // Calculate diversity ratio - how well the player's genre diversity 
@@ -1107,31 +1302,53 @@ export class WalkupSongService {
     const diversityMatchRatio = 1 - Math.abs(userGenreDiversity - playerGenreDiversity);
     const diversityBonus = 0.05 * diversityMatchRatio;
     
-    // NEW: Check if the user has liked any songs by this artist
+    // Check if the user has liked any songs by this artist
     let artistLikedBonus = 0;
-    if (artistsWithLikedSongs.has(playerArtist)) {
-      artistLikedBonus = this.SCORE_WEIGHTS.GENRE_ARTIST_LIKED_BONUS;
+    const artistList = playerArtist.split(',').map(a => a.trim().toLowerCase());
+    for (const artistName of artistList) {
+      if (artistsWithLikedSongs.has(artistName)) {
+        artistLikedBonus = this.SCORE_WEIGHTS.GENRE_ARTIST_LIKED_BONUS;
+        break;
+      }
     }
     
     // Calculate final score with all components
-    const score = (matchScore * this.SCORE_WEIGHTS.MATCH_TYPE.GENRE) + 
+    const score = (weightedMatchScore * this.SCORE_WEIGHTS.MATCH_TYPE.GENRE) + 
                  topGenreBonus + 
                  diversityBonus + 
                  artistLikedBonus;
     
     // Create appropriate reason text
     let reason = '';
-    if (matchScore >= 0.8) reason = `Strong genre match`;
-    else if (matchScore >= 0.5) reason = `Good genre match`;
-    else if (matchScore >= 0.3) reason = `Partial genre match`;
-    else reason = `Minor genre match`;
+    if (exactMatches.length > 0) {
+      if (weightedMatchScore >= 0.8) reason = `Strong exact genre match`;
+      else if (weightedMatchScore >= 0.5) reason = `Good exact genre match`;
+      else if (weightedMatchScore >= 0.3) reason = `Partial exact genre match`;
+      else reason = `Minor exact genre match`;
+    } else {
+      if (weightedMatchScore >= 0.8) reason = `Strong genre match`;
+      else if (weightedMatchScore >= 0.5) reason = `Good genre match`;
+      else if (weightedMatchScore >= 0.3) reason = `Partial genre match`;
+      else reason = `Minor genre match`;
+    }
     
     if (artistLikedBonus > 0) {
       reason += ' (artist in liked songs)';
     }
     
-    // Add details about matching genres
-    const details = matches.map(m => m.name).slice(0, 2).join(', ');
+    // Add details about matching genres, showing exact matches first
+    const exactMatchNames = exactMatches.map(m => m.name);
+    const similarMatchNames = similarMatches.map(m => m.name);
+    
+    let details = '';
+    if (exactMatchNames.length > 0) {
+      details += exactMatchNames.slice(0, 2).join(', ');
+      if (similarMatchNames.length > 0 && exactMatchNames.length < 2) {
+        details += ', ' + similarMatchNames.slice(0, 2 - exactMatchNames.length).join(', ');
+      }
+    } else {
+      details = similarMatchNames.slice(0, 2).join(', ');
+    }
     
     return { score, reason, details };
   }
@@ -1206,7 +1423,15 @@ export class WalkupSongService {
     savedTracksMap: Map<string, boolean>
   ): boolean {
     if (playerSong.spotifyId && savedTracksMap.has(playerSong.spotifyId)) return true;
-    const key = `${playerSong.name}|${playerSong.artist}`;
-    return savedTracksMap.has(key);
+    
+    // Check for all artists in case of multiple artists
+    const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
+    
+    for (const artistName of artistList) {
+      const key = `${playerSong.name}|${artistName}`;
+      if (savedTracksMap.has(key)) return true;
+    }
+    
+    return false;
   }
 }
