@@ -425,36 +425,75 @@ export class WalkupSongService {
   public async getAllPlayers(): Promise<PlayerWalkupSong[]> {
     try {
       const players = await Player.find({});
-      console.log('Raw player data from MongoDB:', players.map(p => ({ name: p.name, stats: p.stats })));
-      return players.map(player => ({
-        playerId: player.id,
-        playerName: player.name,
-        position: player.position,
-        team: player.team,
-        teamId: player.teamId,
-        walkupSong: {
-          id: player.walkupSong.id,
-          songName: player.walkupSong.songName,
-          artistName: player.walkupSong.artistName,
-          albumName: player.walkupSong.albumName || '',
-          spotifyId: player.walkupSong.spotifyId || '',
-          youtubeId: player.walkupSong.youtubeId || '',
-          genre: player.walkupSong.genre || [],
-          albumArt: player.walkupSong.albumArt || ''
-        },
-        stats: {
-          batting: {
-            battingAvg: player.stats?.batting?.battingAvg || 0,
-            onBasePercentage: player.stats?.batting?.onBasePercentage || 0,
-            sluggingPercentage: player.stats?.batting?.sluggingPercentage || 0,
-            plateAppearances: player.stats?.batting?.plateAppearances || 0
-          },
-          pitching: {
-            earnedRunAvg: player.stats?.pitching?.earnedRunAvg || 0,
-            inningsPitched: player.stats?.pitching?.inningsPitched || 0
+      console.log('Raw player data from MongoDB:', players.map(p => ({ 
+        name: p.name, 
+        position: p.position,
+        hasWalkupSong: !!p.walkupSong || (p.walkupSongs && p.walkupSongs.length > 0),
+        walkupSong: p.walkupSong || (p.walkupSongs && p.walkupSongs[0]) || null
+      })));
+      
+      return players.map(player => {
+        // Get the primary walkup song (either from walkupSong field or first from walkupSongs array)
+        const primaryWalkupSong = player.walkupSong || 
+          (player.walkupSongs && player.walkupSongs.length > 0 ? player.walkupSongs[0] : null);
+
+        // Ensure walkupSong exists and has required fields
+        const walkupSong = primaryWalkupSong || {
+          id: 'no-song',
+          songName: 'No walkup song',
+          artistName: 'Unknown',
+          albumName: '',
+          spotifyId: '',
+          youtubeId: '',
+          genre: [],
+          albumArt: ''
+        };
+
+        // Ensure all required fields are present
+        const processedWalkupSong = {
+          id: walkupSong.id || 'no-song',
+          songName: walkupSong.songName || 'No walkup song',
+          artistName: walkupSong.artistName || 'Unknown',
+          albumName: walkupSong.albumName || '',
+          spotifyId: walkupSong.spotifyId || '',
+          youtubeId: walkupSong.youtubeId || '',
+          genre: walkupSong.genre || [],
+          albumArt: walkupSong.albumArt || ''
+        };
+
+        // Process all matching songs if available
+        const matchingSongs = player.walkupSongs?.map(song => ({
+          songName: song.songName,
+          artistName: song.artistName,
+          matchScore: 1,
+          matchReason: 'Walkup song',
+          rankInfo: '',
+          albumArt: song.albumArt || '',
+          previewUrl: null
+        })) || [];
+
+        return {
+          playerId: player.id,
+          playerName: player.name,
+          position: player.position,
+          team: player.team,
+          teamId: player.teamId,
+          walkupSong: processedWalkupSong,
+          matchingSongs,
+          stats: {
+            batting: {
+              battingAvg: player.stats?.batting?.battingAvg || 0,
+              onBasePercentage: player.stats?.batting?.onBasePercentage || 0,
+              sluggingPercentage: player.stats?.batting?.sluggingPercentage || 0,
+              plateAppearances: player.stats?.batting?.plateAppearances || 0
+            },
+            pitching: {
+              earnedRunAvg: player.stats?.pitching?.earnedRunAvg || 0,
+              inningsPitched: player.stats?.pitching?.inningsPitched || 0
+            }
           }
-        }
-      }));
+        };
+      });
     } catch (error) {
       console.error('Error fetching players from MongoDB:', error);
       return [];
