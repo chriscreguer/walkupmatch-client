@@ -11,7 +11,7 @@ export interface WalkupSong {
     albumName?: string;
     spotifyId?: string;
     youtubeId?: string;
-    genre: string[];
+    genre?: string[];
     albumArt?: string;
     previewUrl?: string | null;
   }
@@ -23,6 +23,7 @@ export interface WalkupSong {
     team: string;
     teamId: string;
     walkupSong: WalkupSong;
+    walkupSongs?: WalkupSong[];
     matchReason?: string;
     rankInfo?: string;
     matchScore?: number;
