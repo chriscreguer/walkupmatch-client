@@ -173,7 +173,7 @@ export class WalkupSongService {
   private readonly RATE_LIMIT_DELAY = 1000;
   private isUpdating = false;
   private readonly MIN_MATCH_SCORE = 0.1;
-  private readonly SECONDARY_SONG_THRESHOLD = .2; // Higher threshold for secondary songs
+  private readonly SECONDARY_SONG_THRESHOLD = .4; // Higher threshold for secondary songs
   private usedSongs: Set<string> = new Set();
   private usedArtists: Map<string, number> = new Map(); // Track artist occurrences
   private genreSimilarityCache: Map<string, boolean> = new Map();
