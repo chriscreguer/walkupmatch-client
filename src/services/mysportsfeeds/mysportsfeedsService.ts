@@ -104,7 +104,7 @@ export class MySportsFeedsService {
   private readonly API_BASE_URL = 'https://api.mysportsfeeds.com/v2.1/pull/mlb';
   private readonly API_KEY: string;
   private readonly API_PASSWORD = 'MYSPORTSFEEDS';
-  private readonly SEASON = 'current';
+  private readonly SEASON = 'latest';
   private lastRequestTime = 0;
   private readonly RATE_LIMIT_DELAY = 5500; // 5.5 seconds between requests
   private retryCount = 0;
