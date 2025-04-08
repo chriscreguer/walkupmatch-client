@@ -419,26 +419,18 @@ export class WalkupSongService {
         return;
       }
 
-      // Fetch the existing player (if any)
+      // Try to find an existing player document by its API id.
       const existingPlayer = await Player.findOne({ id: player.data.id });
 
-      // Determine new position
-      const newPosition = (player.data.position && player.data.position !== 'Unknown')
-        ? player.data.position
-        : (existingPlayer ? existingPlayer.position : 'Unknown');
-
-      // Parse the song and artist data
-      const newWalkupSong = player.data.songs?.[0]
+      // Parse the incoming song data from the API.
+      const newSong = player.data.songs?.[0]
         ? (() => {
             const song = player.data.songs[0];
-            // Retain original comma-separated artist string for compatibility
             const originalArtistString = song.artists?.join(', ') || 'Unknown';
-            // Build the structured artists array
-            let parsedArtists = [];
+            const parsedArtists = [];
             if (song.artists && Array.isArray(song.artists) && song.artists.length > 0) {
-              // First artist is primary
+              // First artist is primary; subsequent artists are featured.
               parsedArtists.push({ name: song.artists[0], role: 'primary' });
-              // All remaining artists are featured
               for (let i = 1; i < song.artists.length; i++) {
                 parsedArtists.push({ name: song.artists[i], role: 'featured' });
               }
@@ -457,56 +449,47 @@ export class WalkupSongService {
               albumArt: song.spotify_image || null
             };
           })()
-        : {
-            id: 'no-song',
-            songName: 'No walkup song',
-            artistName: 'Unknown',
-            artists: [{ name: 'Unknown', role: 'primary' }],
-            albumName: 'Unknown',
-            spotifyId: null,
-            youtubeId: null,
-            genre: [],
-            albumArt: null
-          };
+        : null;
 
-      const playerData = {
-        id: player.data.id,
-        mlbId: player.data.mlb_id,
-        name: player.data.name,
-        position: newPosition,
-        team: player.data.team?.name || 'Unknown',
-        teamId: player.data.team?.id || 'Unknown',
-        walkupSong: newWalkupSong,
-        lastUpdated: new Date()
-      };
+      // If there is no new song data, exit early.
+      if (!newSong) {
+        console.log("No song data available in API response.");
+        return;
+      }
 
       if (existingPlayer) {
-        // Update existing player
-        await Player.updateOne(
-          { id: playerData.id },
-          {
-            $set: {
-              mlbId: playerData.mlbId,
-              name: playerData.name,
-              position: playerData.position,
-              team: playerData.team,
-              teamId: playerData.teamId,
-              walkupSong: playerData.walkupSong,
-              lastUpdated: playerData.lastUpdated
-            },
-            // Use $addToSet to add the new song only if it doesn't already exist
-            $addToSet: { 
-              walkupSongs: {
-                $each: [playerData.walkupSong]
-              }
-            }
-          }
+        // Check whether this new song is already in the walkupSongs array.
+        const songAlreadyExists = existingPlayer.walkupSongs.some(
+          (song: { id: string }) => song.id === newSong.id
         );
+
+        // Build the update object, explicitly omitting position
+        const updateObj = {
+          mlbId: player.data.mlb_id,
+          name: player.data.name,
+          team: player.data.team?.name || 'Unknown',
+          teamId: player.data.team?.id || 'Unknown',
+          lastUpdated: new Date()
+        };
+
+        // Only add the song to walkupSongs if it isn't already present.
+        const updateQuery = {
+          $set: updateObj,
+          ...(!songAlreadyExists ? { $addToSet: { walkupSongs: newSong } } : {})
+        };
+
+        await Player.updateOne({ id: player.data.id }, updateQuery);
       } else {
-        // Create new player
+        // For a new player, create a document with an empty position
         const newPlayer = new Player({
-          ...playerData,
-          walkupSongs: [playerData.walkupSong]
+          id: player.data.id,
+          mlbId: player.data.mlb_id,
+          name: player.data.name,
+          position: '', // Set empty position for new players
+          team: player.data.team?.name || 'Unknown',
+          teamId: player.data.team?.id || 'Unknown',
+          lastUpdated: new Date(),
+          walkupSongs: [newSong]
         });
         await newPlayer.save();
       }
@@ -1158,8 +1141,13 @@ export class WalkupSongService {
           role: 'primary' // Default to primary for backward compatibility
         }));
     
+    // Track matches for multiple artist bonus calculation
+    const matchedArtists = new Map<string, { score: number; rank: number; timeFrame: TimeFrame }>();
+    
     // Check each artist individually
     for (const artist of artistList) {
+      let bestMatch: { score: number; rank: number; timeFrame: TimeFrame } | null = null;
+      
       for (const timeFrame of timeFrames) {
         const artists = userArtists[timeFrame];
         // Find exact artist match
@@ -1178,16 +1166,61 @@ export class WalkupSongService {
           // Adjust score based on artist role
           const roleMultiplier = artist.role === 'primary' ? 1.0 : 0.8;
           const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
-          const score = (this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty) * roleMultiplier;
+          const baseScore = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
+          const score = baseScore * roleMultiplier;
           
-          const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
-          matches.push({ 
-            score, 
-            reason: artist.role === 'primary' ? 'Top artist' : 'Featured artist', 
-            details, 
-            rank, 
-            timeFrame 
-          });
+          // Only keep the best match for this artist across all timeframes
+          if (!bestMatch || score > bestMatch.score) {
+            bestMatch = { score, rank, timeFrame };
+          }
+        }
+      }
+      
+      if (bestMatch) {
+        matchedArtists.set(artist.name, bestMatch);
+        
+        const details = `#${bestMatch.rank} ${bestMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(bestMatch.timeFrame)}`}`;
+        matches.push({ 
+          score: bestMatch.score, 
+          reason: artist.role === 'primary' ? 'Top artist' : 'Featured artist', 
+          details, 
+          rank: bestMatch.rank, 
+          timeFrame: bestMatch.timeFrame 
+        });
+      }
+    }
+    
+    // Add multiple artist bonus if we have more than one unique artist match
+    if (matchedArtists.size > 1) {
+      // Log details about multiple artist matches
+      console.log(`\nMultiple artist matches found for song: ${playerSong.name}`);
+      console.log('Song artists:', artistList.map(a => `${a.name} (${a.role})`).join(', '));
+      console.log('Matched artists:', Array.from(matchedArtists.entries()).map(([name, match]) => 
+        `${name}: #${match.rank} in ${match.timeFrame} (score: ${match.score})`
+      ).join(', '));
+      
+      // Sort matches by score to get the highest scoring match
+      const sortedMatches = Array.from(matchedArtists.values()).sort((a, b) => b.score - a.score);
+      const highestScore = sortedMatches[0].score;
+      
+      // Calculate bonus based on number of unique artist matches and their quality
+      let multipleArtistBonus = 0;
+      for (let i = 1; i < sortedMatches.length; i++) {
+        // Each additional unique artist match contributes less to the bonus
+        const match = sortedMatches[i];
+        const qualityFactor = match.rank <= 25 ? 1.0 : 0.5; // Higher quality matches contribute more
+        multipleArtistBonus += (this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS * qualityFactor) / i;
+      }
+      
+      // Add the bonus to the highest scoring match
+      if (multipleArtistBonus > 0) {
+        const bestMatch = matches.find(m => 
+          m.score === highestScore && 
+          m.reason.includes('Top artist') || m.reason.includes('Featured artist')
+        );
+        if (bestMatch) {
+          bestMatch.score += multipleArtistBonus;
+          bestMatch.reason += ` (${matchedArtists.size} unique artists)`;
         }
       }
     }
@@ -1477,30 +1510,25 @@ export class WalkupSongService {
       
       // Non-pitchers need at least 1 PA per game
       if (!player.position.includes('P')) {
-        const minPA = this.tigersGamesPlayed * 1 ; // Use cached value or default
+        const minPA = this.tigersGamesPlayed * 1;
         const currentPA = player.stats?.batting?.plateAppearances || 0;
         if (currentPA < minPA) {
-       
           return false;
-         
         }
-        console.log(`Player ${playerName} has sufficient PAs: ${currentPA} > ${minPA}`);
         return true;
-       
       }
       
       // Pitchers need at least 1 IP per game
-      const minIP = (this.tigersGamesPlayed * .4); // Use cached value or default
+      const minIP = (this.tigersGamesPlayed * .4);
       const currentIP = player.stats?.pitching?.inningsPitched || 0;
       if (currentIP < minIP) {
-     
         return false;
       }
-   
+      
       return true;
     } catch (error) {
       console.error('Error validating player stats:', error);
-      return false; // On error, fail the validation
+      return false;
     }
   }
 }
