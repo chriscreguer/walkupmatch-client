@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { enrichPlayerData } from './enrichPlayerData';
+import { updateTeamStats } from './updateTeamStats';
 import dotenv from 'dotenv';
 import path from 'path';
 
@@ -11,7 +12,8 @@ cron.schedule('0 3 * * *', async () => {
   console.log('Starting scheduled player data enrichment...');
   try {
     await enrichPlayerData();
-    console.log('Player data enrichment completed successfully');
+    await updateTeamStats();
+    console.log('Player data enrichment and team stats update completed successfully');
   } catch (error) {
     console.error('Error during scheduled enrichment:', error);
   }
@@ -20,9 +22,12 @@ cron.schedule('0 3 * * *', async () => {
 // Run immediately if called directly
 if (require.main === module) {
   console.log('Running initial player data enrichment...');
-  enrichPlayerData()
+  Promise.all([
+    enrichPlayerData(),
+    updateTeamStats()
+  ])
     .then(() => {
-      console.log('Initial enrichment completed successfully');
+      console.log('Initial enrichment and team stats update completed successfully');
       process.exit(0);
     })
     .catch((error) => {

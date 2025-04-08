@@ -77,6 +77,14 @@ interface NameConflict {
   matches: MySportsFeedsPlayer[];
 }
 
+interface TeamStats {
+  team: string;
+  gamesPlayed: number;
+  wins: number;
+  losses: number;
+  lastUpdated: Date;
+}
+
 export class MySportsFeedsService {
   private static instance: MySportsFeedsService;
   private readonly API_BASE_URL = 'https://api.mysportsfeeds.com/v2.1/pull/mlb';
@@ -347,6 +355,52 @@ export class MySportsFeedsService {
           }
         }
       };
+    }
+  }
+
+  public async updateTeamGamesPlayed(teamAbbr: string): Promise<TeamStats | null> {
+    try {
+      await this.waitForRateLimit();
+      
+      console.log(`Fetching team stats for ${teamAbbr} from MySportsFeeds API...`);
+      const response = await axios.get(`${this.API_BASE_URL}/${this.SEASON}/standings.json`, {
+        headers: {
+          'Authorization': this.getAuthHeader(),
+          'Accept': 'application/json'
+        },
+        params: {
+          team: teamAbbr
+        }
+      });
+
+      const teamData = response.data.standings?.entries?.[0];
+      if (!teamData) {
+        console.error(`No team data found for ${teamAbbr}`);
+        return null;
+      }
+
+      const stats = teamData.stats;
+      const gamesPlayed = (stats.wins || 0) + (stats.losses || 0);
+      
+      const teamStats: TeamStats = {
+        team: teamAbbr,
+        gamesPlayed,
+        wins: stats.wins || 0,
+        losses: stats.losses || 0,
+        lastUpdated: new Date()
+      };
+
+      console.log(`Retrieved team stats for ${teamAbbr}: ${gamesPlayed} games played`);
+      return teamStats;
+    } catch (error) {
+      console.error(`Error updating team games played for ${teamAbbr}:`, error);
+      if (axios.isAxiosError(error)) {
+        console.error("API Error details:", {
+          status: error.response?.status,
+          data: error.response?.data
+        });
+      }
+      return null;
     }
   }
 }
