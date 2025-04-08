@@ -19,6 +19,10 @@ const playerSchema = new mongoose.Schema({
     id: { type: String, required: true },
     songName: { type: String, required: true },
     artistName: { type: String, required: true },
+    artists: [{
+      name: { type: String, required: true },
+      role: { type: String, enum: ['primary', 'featured'], required: true }
+    }],
     albumName: String,
     spotifyId: String,
     youtubeId: String,
@@ -45,6 +49,10 @@ const playerSchema = new mongoose.Schema({
     id: { type: String, required: true },
     songName: { type: String, required: true },
     artistName: { type: String, required: true },
+    artists: [{
+      name: { type: String, required: true },
+      role: { type: String, enum: ['primary', 'featured'], required: true }
+    }],
     albumName: String,
     spotifyId: String,
     youtubeId: String,
@@ -65,6 +73,10 @@ interface PlayerDocument extends mongoose.Document {
     id: string;
     songName: string;
     artistName: string;
+    artists: Array<{
+      name: string;
+      role: 'primary' | 'featured';
+    }>;
     albumName?: string;
     spotifyId?: string;
     youtubeId?: string;
@@ -91,6 +103,10 @@ interface PlayerDocument extends mongoose.Document {
     id: string;
     songName: string;
     artistName: string;
+    artists: Array<{
+      name: string;
+      role: 'primary' | 'featured';
+    }>;
     albumName: string;
     spotifyId?: string;
     youtubeId?: string;
@@ -411,22 +427,41 @@ export class WalkupSongService {
         ? player.data.position
         : (existingPlayer ? existingPlayer.position : 'Unknown');
 
-      // Create the new walkup song object
+      // Parse the song and artist data
       const newWalkupSong = player.data.songs?.[0]
-        ? {
-            id: player.data.songs[0].id,
-            songName: player.data.songs[0].title,
-            artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
-            albumName: 'Unknown',
-            spotifyId: null,
-            youtubeId: null,
-            genre: [],
-            albumArt: player.data.songs[0].spotify_image || null
-          }
+        ? (() => {
+            const song = player.data.songs[0];
+            // Retain original comma-separated artist string for compatibility
+            const originalArtistString = song.artists?.join(', ') || 'Unknown';
+            // Build the structured artists array
+            let parsedArtists = [];
+            if (song.artists && Array.isArray(song.artists) && song.artists.length > 0) {
+              // First artist is primary
+              parsedArtists.push({ name: song.artists[0], role: 'primary' });
+              // All remaining artists are featured
+              for (let i = 1; i < song.artists.length; i++) {
+                parsedArtists.push({ name: song.artists[i], role: 'featured' });
+              }
+            } else {
+              parsedArtists.push({ name: 'Unknown', role: 'primary' });
+            }
+            return {
+              id: song.id,
+              songName: song.title,
+              artistName: originalArtistString,
+              artists: parsedArtists,
+              albumName: 'Unknown',
+              spotifyId: null,
+              youtubeId: null,
+              genre: [],
+              albumArt: song.spotify_image || null
+            };
+          })()
         : {
             id: 'no-song',
             songName: 'No walkup song',
             artistName: 'Unknown',
+            artists: [{ name: 'Unknown', role: 'primary' }],
             albumName: 'Unknown',
             spotifyId: null,
             youtubeId: null,
@@ -484,8 +519,6 @@ export class WalkupSongService {
   public async getAllPlayers(): Promise<PlayerWalkupSong[]> {
     try {
       const players = await Player.find({});
-
-      
       return players.map(player => {
         // Get all walkup songs (both from walkupSong field and walkupSongs array)
         const allWalkupSongs = [
@@ -498,6 +531,7 @@ export class WalkupSongService {
           id: song.id || 'no-song',
           songName: song.songName || 'No walkup song',
           artistName: song.artistName || 'Unknown',
+          artists: song.artists || [{ name: 'Unknown', role: 'primary' }],
           albumName: song.albumName || '',
           spotifyId: song.spotifyId || '',
           youtubeId: song.youtubeId || '',
@@ -547,6 +581,7 @@ export class WalkupSongService {
           id: player.walkupSong.id,
           songName: player.walkupSong.songName,
           artistName: player.walkupSong.artistName,
+          artists: player.walkupSong.artists || [{ name: 'Unknown', role: 'primary' }],
           albumName: player.walkupSong.albumName || '',
           spotifyId: player.walkupSong.spotifyId || '',
           youtubeId: player.walkupSong.youtubeId || '',
@@ -577,6 +612,7 @@ export class WalkupSongService {
             id: player.walkupSong.id,
             songName: player.walkupSong.songName,
             artistName: player.walkupSong.artistName,
+            artists: player.walkupSong.artists || [{ name: 'Unknown', role: 'primary' }],
             albumName: player.walkupSong.albumName || '',
             spotifyId: player.walkupSong.spotifyId || '',
             youtubeId: player.walkupSong.youtubeId || '',
@@ -1097,7 +1133,7 @@ export class WalkupSongService {
    * Find all possible artist matches for a player.
    */
   private findAllArtistMatches(
-    playerSong: { name: string; artist: string; spotifyId?: string },
+    playerSong: { name: string; artist: string; spotifyId?: string; artists?: Array<{ name: string; role: string }> },
     userTracks: Record<TimeFrame, NormalizedTrack[]>,
     userArtists: Record<TimeFrame, NormalizedArtist[]>,
     _savedTracksMap: Map<string, boolean>
@@ -1111,29 +1147,47 @@ export class WalkupSongService {
       matches.push(...featureMatches);
     }
     
-    // Split artist string by commas to handle multiple artists
-    const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
+    // Get artist list, preferring structured data if available
+    const artistList = playerSong.artists && playerSong.artists.length > 0
+      ? playerSong.artists.map(a => ({
+          name: a.name.toLowerCase(),
+          role: a.role
+        }))
+      : playerSong.artist.split(',').map(a => ({
+          name: a.trim().toLowerCase(),
+          role: 'primary' // Default to primary for backward compatibility
+        }));
     
     // Check each artist individually
-    for (const artistName of artistList) {
+    for (const artist of artistList) {
       for (const timeFrame of timeFrames) {
         const artists = userArtists[timeFrame];
         // Find exact artist match
-        const matchedArtist = artists.find(artist => 
-          artist.name && artistName && artist.name === artistName);
+        const matchedArtist = artists.find(userArtist => 
+          userArtist.name && artist.name && userArtist.name === artist.name);
         
         if (matchedArtist) {
-          // Regular artist match scoring
+          // Regular artist match scoring with role consideration
           const rank = matchedArtist.rank || 0;
           const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
           let rankBonus = 0;
           if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
           else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
           else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
+          
+          // Adjust score based on artist role
+          const roleMultiplier = artist.role === 'primary' ? 1.0 : 0.8;
           const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
-          const score = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
+          const score = (this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty) * roleMultiplier;
+          
           const details = `#${rank} ${timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(timeFrame)}`}`;
-          matches.push({ score, reason: 'Top artist', details, rank, timeFrame });
+          matches.push({ 
+            score, 
+            reason: artist.role === 'primary' ? 'Top artist' : 'Featured artist', 
+            details, 
+            rank, 
+            timeFrame 
+          });
         }
       }
     }

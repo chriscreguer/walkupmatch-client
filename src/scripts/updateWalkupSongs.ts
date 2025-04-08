@@ -1,14 +1,14 @@
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { WalkupSongService } from '../src/services/walkupSongs/walkupSongService.js';
+import { WalkupSongService } from '@/services/walkupSongs/walkupSongService';
 
 // Get the directory name of the current module
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Load environment variables from .env.local
-config({ path: join(__dirname, '..', '.env.local') });
+config({ path: join(__dirname, '..', '..', '.env.local') });
 
 async function main() {
   console.log('Starting walkup song data update...');
