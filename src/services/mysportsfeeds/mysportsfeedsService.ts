@@ -85,6 +85,20 @@ interface TeamStats {
   lastUpdated: Date;
 }
 
+interface TeamStatsResponse {
+  team: {
+    id: string;
+    abbreviation: string;
+    name: string;
+  };
+  stats: {
+    standings: {
+      wins: number;
+      losses: number;
+    };
+  };
+}
+
 export class MySportsFeedsService {
   private static instance: MySportsFeedsService;
   private readonly API_BASE_URL = 'https://api.mysportsfeeds.com/v2.1/pull/mlb';
@@ -363,30 +377,36 @@ export class MySportsFeedsService {
       await this.waitForRateLimit();
       
       console.log(`Fetching team stats for ${teamAbbr} from MySportsFeeds API...`);
-      const response = await axios.get(`${this.API_BASE_URL}/${this.SEASON}/standings.json`, {
+      const response = await axios.get(`${this.API_BASE_URL}/${this.SEASON}/team_stats_totals.json`, {
         headers: {
           'Authorization': this.getAuthHeader(),
           'Accept': 'application/json'
         },
         params: {
-          team: teamAbbr
+          team: teamAbbr.toLowerCase(),
+          force: true
         }
       });
 
-      const teamData = response.data.standings?.entries?.[0];
+      console.log('API Response:', JSON.stringify(response.data, null, 2));
+
+      const teamData = response.data.teamStatsTotals?.find((team: TeamStatsResponse) => 
+        team.team.abbreviation.toLowerCase() === teamAbbr.toLowerCase()
+      );
+
       if (!teamData) {
         console.error(`No team data found for ${teamAbbr}`);
         return null;
       }
 
       const stats = teamData.stats;
-      const gamesPlayed = (stats.wins || 0) + (stats.losses || 0);
+      const gamesPlayed = (stats.standings.wins || 0) + (stats.standings.losses || 0);
       
       const teamStats: TeamStats = {
         team: teamAbbr,
         gamesPlayed,
-        wins: stats.wins || 0,
-        losses: stats.losses || 0,
+        wins: stats.standings.wins || 0,
+        losses: stats.standings.losses || 0,
         lastUpdated: new Date()
       };
 
@@ -395,7 +415,7 @@ export class MySportsFeedsService {
     } catch (error) {
       console.error(`Error updating team games played for ${teamAbbr}:`, error);
       if (axios.isAxiosError(error)) {
-        console.error("API Error details:", {
+        console.error('API Error details:', {
           status: error.response?.status,
           data: error.response?.data
         });

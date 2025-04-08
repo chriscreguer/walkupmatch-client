@@ -4,6 +4,8 @@ import cron from 'node-cron';
 import { PlayerWalkupSong, WalkupSong } from '@/lib/walkupSongs/types';
 import { SpotifyGenreSummary, SpotifyTopItem } from '@/services/spotify/spotifyService';
 import { Position } from '@/lib/mlb/types';
+import { MySportsFeedsService } from '@/services/mySportsFeeds/mySportsFeedsService';
+import { TeamStatsModel } from '@/models/teamStatsModel';
 
 // Define MongoDB schema for player data
 const playerSchema = new mongoose.Schema({
@@ -198,6 +200,7 @@ export class WalkupSongService {
   private usedArtists: Map<string, number> = new Map(); // Track artist occurrences
   private genreSimilarityCache: Map<string, boolean> = new Map();
   private readonly MULTIPLE_SONG_BONUS = 0.03; // 3% bonus per additional qualifying song
+  private tigersGamesPlayed: number | null = null;
 
   // Compatibility matrices; DH handled separately
   private readonly COMPATIBLE_POSITIONS: Record<string, string[]> = {
@@ -481,12 +484,7 @@ export class WalkupSongService {
   public async getAllPlayers(): Promise<PlayerWalkupSong[]> {
     try {
       const players = await Player.find({});
-      console.log('Raw player data from MongoDB:', players.map(p => ({ 
-        name: p.name, 
-        position: p.position,
-        hasWalkupSong: !!p.walkupSong || (p.walkupSongs && p.walkupSongs.length > 0),
-        walkupSong: p.walkupSong || (p.walkupSongs && p.walkupSongs[0]) || null
-      })));
+
       
       return players.map(player => {
         // Get all walkup songs (both from walkupSong field and walkupSongs array)
@@ -642,15 +640,20 @@ export class WalkupSongService {
     positions: Position[],
     userSavedAlbums: SpotifyTopItem[] = []
   ): Promise<PlayerWalkupSong[]> {
-    console.log('Starting team matching with preferences:', {
-      userGenres: userGenres.map(g => g.name),
-      topTracksCount: userTopTracks.long_term.length + userTopTracks.medium_term.length + userTopTracks.short_term.length,
-      topArtistsCount: userTopArtists.long_term.length + userTopArtists.medium_term.length + userTopArtists.short_term.length,
-      savedTracksCount: userSavedTracks.length,
-      topGenresCount: userGenres.length,
-      positions: positions.map(p => p.position),
-      savedAlbumsCount: userSavedAlbums.length
-    });
+    // Get Tigers' games played for validation
+    try {
+      const teamStats = await TeamStatsModel.findOne({ teamId: 'det' });
+      if (teamStats) {
+        this.tigersGamesPlayed = teamStats.gamesPlayed;
+        console.log(`Using Tigers' games played for validation: ${this.tigersGamesPlayed}`);
+      } else {
+        this.tigersGamesPlayed = 10; // Default fallback
+        console.log('No Tigers stats found, using default games played threshold');
+      }
+    } catch (error) {
+      console.error('Error fetching Tigers games played:', error);
+      this.tigersGamesPlayed = 10; // Default fallback on error
+    }
 
     // Reset caches
     this.usedSongs.clear();
@@ -661,36 +664,42 @@ export class WalkupSongService {
     const allPlayerSongs = await this.getAllPlayers();
     console.log('Total players before filtering:', allPlayerSongs.length);
     
-    const validPlayers = allPlayerSongs.filter(player => {
-      // Basic walkup song validation
-      const hasValidWalkupSong = player.walkupSong &&
-        player.walkupSong.songName &&
-        player.walkupSong.artistName &&
-        player.walkupSong.songName !== 'No walkup song';
-      
-      if (!hasValidWalkupSong) {
-        return false;
-      }
+    // Validate all players' stats first
+    const validationResults = await Promise.all(
+      allPlayerSongs.map(async player => {
+        const isValid = await this.validatePlayerStats(player);
+        if (!isValid) {
+        
+        }
+        return { player, isValid };
+      })
+    );
+    
+    const validPlayers = validationResults
+      .filter(({ player, isValid }) => {
+        // Basic walkup song validation
+        const hasValidWalkupSong = player.walkupSong &&
+          player.walkupSong.songName &&
+          player.walkupSong.artistName &&
+          player.walkupSong.songName !== 'No walkup song';
+        
+        if (!hasValidWalkupSong) {
+        
+          return false;
+        }
 
-      // Stats validation
-      if (player.position !== 'P') {
-        // For non-pitchers, check PA
-        const pa = player.stats?.batting?.plateAppearances ?? 0;
-        return pa >= 5;
-      } else {
-        // For pitchers, check IP
-        const ip = player.stats?.pitching?.inningsPitched ?? 0;
-        return ip >= 3;
-      }
-    });
+        if (!isValid) {
+         
+          return false;
+        }
+        
+     
+        return true;
+      })
+      .map(({ player }) => player);
     
     console.log('Players after filtering:', validPlayers.length);
-    console.log('Sample of filtered players:', validPlayers.slice(0, 5).map(p => ({
-      name: p.playerName,
-      position: p.position,
-      pa: p.stats?.batting?.plateAppearances,
-      ip: p.stats?.pitching?.inningsPitched
-    })));
+
 
     // Normalize user preferences
     const userTopGenres = userGenres.slice(0, 10).map(g => ({
@@ -1405,5 +1414,39 @@ export class WalkupSongService {
     }
     
     return false;
+  }
+
+  private async validatePlayerStats(player: PlayerDocument | PlayerWalkupSong): Promise<boolean> {
+    try {
+      // Get player name for logging
+      const playerName = 'playerName' in player ? player.playerName : player.name;
+      
+      // Non-pitchers need at least 1 PA per game
+      if (!player.position.includes('P')) {
+        const minPA = this.tigersGamesPlayed * 1 ; // Use cached value or default
+        const currentPA = player.stats?.batting?.plateAppearances || 0;
+        if (currentPA < minPA) {
+       
+          return false;
+         
+        }
+        console.log(`Player ${playerName} has sufficient PAs: ${currentPA} > ${minPA}`);
+        return true;
+       
+      }
+      
+      // Pitchers need at least 1 IP per game
+      const minIP = (this.tigersGamesPlayed * .4); // Use cached value or default
+      const currentIP = player.stats?.pitching?.inningsPitched || 0;
+      if (currentIP < minIP) {
+     
+        return false;
+      }
+   
+      return true;
+    } catch (error) {
+      console.error('Error validating player stats:', error);
+      return false; // On error, fail the validation
+    }
   }
 }

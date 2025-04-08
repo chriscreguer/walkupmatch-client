@@ -116,7 +116,7 @@ export function calculateTeamStats(
       stats !== undefined
     );
 
-  console.log('Valid hitter stats:', validHitterStats);
+
 
   // Calculate pitching stats
   const validPitcherStats = pitchers
@@ -125,7 +125,7 @@ export function calculateTeamStats(
       stats !== undefined
     );
 
-  console.log('Valid pitcher stats:', validPitcherStats);
+
 
   // Calculate team AVG (batting average)
   const teamAVG = validHitterStats.length > 0
