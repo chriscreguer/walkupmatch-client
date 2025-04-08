@@ -114,6 +114,14 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
     }));
   }).sort((a, b) => b.matchScore - a.matchScore);
 
+  // Deduplicate matching songs by title/artist combo
+  const dedupedMatchingSongs = allMatchingSongs.filter((song, index, self) => {
+    const key = `${song.songName.trim().toLowerCase()}|${song.artistName.trim().toLowerCase()}`;
+    return index === self.findIndex(s =>
+      `${s.songName.trim().toLowerCase()}|${s.artistName.trim().toLowerCase()}` === key
+    );
+  });
+
   return (
     <div className="w-full mt-6">
       <div className="flex justify-between items-center mb-2">
@@ -138,7 +146,7 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
         
         {/* Playlist Items */}
         <div>
-          {allMatchingSongs.map((song, index) => {
+          {dedupedMatchingSongs.map((song, index) => {
             const isPlaying = playingAudio === `${song.playerId}-${index}`;
             
             return (

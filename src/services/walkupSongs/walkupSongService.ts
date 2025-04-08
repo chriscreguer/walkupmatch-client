@@ -38,7 +38,17 @@ const playerSchema = new mongoose.Schema({
       earnedRunAvg: Number,
       inningsPitched: Number
     }
-  }
+  },
+  walkupSongs: [{
+    id: { type: String, required: true },
+    songName: { type: String, required: true },
+    artistName: { type: String, required: true },
+    albumName: String,
+    spotifyId: String,
+    youtubeId: String,
+    genre: [String],
+    albumArt: String
+  }]
 });
 
 // Define TypeScript interface for MongoDB document
@@ -75,6 +85,16 @@ interface PlayerDocument extends mongoose.Document {
       inningsPitched: number;
     };
   };
+  walkupSongs: Array<{
+    id: string;
+    songName: string;
+    artistName: string;
+    albumName: string;
+    spotifyId?: string;
+    youtubeId?: string;
+    genre: string[];
+    albumArt?: string;
+  }>;
 }
 
 // Matching data types
@@ -173,7 +193,7 @@ export class WalkupSongService {
   private readonly RATE_LIMIT_DELAY = 1000;
   private isUpdating = false;
   private readonly MIN_MATCH_SCORE = 0.1;
-  private readonly SECONDARY_SONG_THRESHOLD = .4; // Higher threshold for secondary songs
+  private readonly SECONDARY_SONG_THRESHOLD = 1; // Higher threshold for secondary songs
   private usedSongs: Set<string> = new Set();
   private usedArtists: Map<string, number> = new Map(); // Track artist occurrences
   private genreSimilarityCache: Map<string, boolean> = new Map();
@@ -379,44 +399,77 @@ export class WalkupSongService {
         console.log('Invalid player data:', player);
         return;
       }
+
+      // Fetch the existing player (if any)
+      const existingPlayer = await Player.findOne({ id: player.data.id });
+
+      // Determine new position
+      const newPosition = (player.data.position && player.data.position !== 'Unknown')
+        ? player.data.position
+        : (existingPlayer ? existingPlayer.position : 'Unknown');
+
+      // Create the new walkup song object
+      const newWalkupSong = player.data.songs?.[0]
+        ? {
+            id: player.data.songs[0].id,
+            songName: player.data.songs[0].title,
+            artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
+            albumName: 'Unknown',
+            spotifyId: null,
+            youtubeId: null,
+            genre: [],
+            albumArt: player.data.songs[0].spotify_image || null
+          }
+        : {
+            id: 'no-song',
+            songName: 'No walkup song',
+            artistName: 'Unknown',
+            albumName: 'Unknown',
+            spotifyId: null,
+            youtubeId: null,
+            genre: [],
+            albumArt: null
+          };
+
       const playerData = {
         id: player.data.id,
         mlbId: player.data.mlb_id,
         name: player.data.name,
-        position: player.data.position || 'Unknown',
+        position: newPosition,
         team: player.data.team?.name || 'Unknown',
         teamId: player.data.team?.id || 'Unknown',
-        walkupSong: player.data.songs?.[0]
-          ? {
-              id: player.data.songs[0].id,
-              songName: player.data.songs[0].title,
-              artistName: player.data.songs[0].artists?.join(', ') || 'Unknown',
-              albumName: 'Unknown',
-              spotifyId: null,
-              youtubeId: null,
-              genre: [],
-              albumArt: player.data.songs[0].spotify_image || null
-            }
-          : {
-              id: 'no-song',
-              songName: 'No walkup song',
-              artistName: 'Unknown',
-              albumName: 'Unknown',
-              spotifyId: null,
-              youtubeId: null,
-              genre: [],
-              albumArt: null
-            },
+        walkupSong: newWalkupSong,
         lastUpdated: new Date()
       };
-      console.log('Processing player:', playerData.name);
-      const existingPlayer = await Player.findOne({ id: playerData.id });
+
       if (existingPlayer) {
-        console.log('Updating existing player:', playerData.id);
-        await Player.updateOne({ id: playerData.id }, { $set: playerData });
+        // Update existing player
+        await Player.updateOne(
+          { id: playerData.id },
+          {
+            $set: {
+              mlbId: playerData.mlbId,
+              name: playerData.name,
+              position: playerData.position,
+              team: playerData.team,
+              teamId: playerData.teamId,
+              walkupSong: playerData.walkupSong,
+              lastUpdated: playerData.lastUpdated
+            },
+            // Use $addToSet to add the new song only if it doesn't already exist
+            $addToSet: { 
+              walkupSongs: {
+                $each: [playerData.walkupSong]
+              }
+            }
+          }
+        );
       } else {
-        console.log('Creating new player:', playerData.id);
-        const newPlayer = new Player(playerData);
+        // Create new player
+        const newPlayer = new Player({
+          ...playerData,
+          walkupSongs: [playerData.walkupSong]
+        });
         await newPlayer.save();
       }
     } catch (error) {
