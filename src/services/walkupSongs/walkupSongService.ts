@@ -15,20 +15,6 @@ const playerSchema = new mongoose.Schema({
   position: { type: String, required: true },
   team: { type: String, required: true },
   teamId: { type: String, required: true },
-  walkupSong: {
-    id: { type: String, required: true },
-    songName: { type: String, required: true },
-    artistName: { type: String, required: true },
-    artists: [{
-      name: { type: String, required: true },
-      role: { type: String, enum: ['primary', 'featured'], required: true }
-    }],
-    albumName: String,
-    spotifyId: String,
-    youtubeId: String,
-    genre: [String],
-    albumArt: String
-  },
   matchReason: String,
   rankInfo: String,
   matchScore: Number,
@@ -46,20 +32,24 @@ const playerSchema = new mongoose.Schema({
     }
   },
   walkupSongs: [{
-    id: { type: String, required: true },
+    _id: false,  // Disable auto-generated _id for these subdocuments
+    id: { type: String, required: true }, // Removed unique: true
     songName: { type: String, required: true },
     artistName: { type: String, required: true },
     artists: [{
       name: { type: String, required: true },
       role: { type: String, enum: ['primary', 'featured'], required: true }
     }],
-    albumName: String,
-    spotifyId: String,
-    youtubeId: String,
-    genre: [String],
-    albumArt: String
+    albumName: { type: String, default: '' },
+    spotifyId: { type: String, default: '' },
+    youtubeId: { type: String, default: '' },
+    genre: { type: [String], default: [] },
+    albumArt: { type: String, default: '' }
   }]
 });
+
+// Removed the global unique index
+// playerSchema.index({ 'walkupSongs.id': 1 }, { unique: true });
 
 // Define TypeScript interface for MongoDB document
 interface PlayerDocument extends mongoose.Document {
@@ -69,20 +59,7 @@ interface PlayerDocument extends mongoose.Document {
   position: string;
   team: string;
   teamId: string;
-  walkupSong: {
-    id: string;
-    songName: string;
-    artistName: string;
-    artists: Array<{
-      name: string;
-      role: 'primary' | 'featured';
-    }>;
-    albumName?: string;
-    spotifyId?: string;
-    youtubeId?: string;
-    genre: string[];
-    albumArt?: string;
-  };
+  // Legacy walkupSong property removed.
   matchReason?: string;
   rankInfo?: string;
   matchScore?: number;
@@ -200,10 +177,10 @@ interface APIResponse {
  * This version uses a two‑pass greedy approach:
  *  • First pass: For each position, select the highest‑scoring eligible candidate while ensuring
  *    uniqueness of both players and songs. The assigned slot is stored separately.
- *  • Second pass: For positions with duplicate artists or songs, attempt to swap the lower‑ranked occurrence
- *    with an alternative candidate. When evaluating alternatives, we compute an effective score (applying
- *    a penalty based on how many times the candidate's artist already appears) and then assign the candidate
- *    to the slot (overriding their DB position).
+ *  • Second pass: For positions with duplicate artists or songs, attempt to swap
+ *    the lower‑ranked occurrence with an alternative candidate. When evaluating alternatives,
+ *    compute an effective score (applying a penalty based on how many times the candidate's artist already appears)
+ *    and then assign the candidate to the slot (overriding their DB position).
  */
 export class WalkupSongService {
   private static instance: WalkupSongService;
@@ -419,51 +396,61 @@ export class WalkupSongService {
         return;
       }
 
-      // Try to find an existing player document by its API id.
-      const existingPlayer = await Player.findOne({ id: player.data.id });
+      // Parse the incoming song data from the API
+      const newSongs: Array<{
+        id: string;
+        songName: string;
+        artistName: string;
+        artists: Array<{ name: string; role: 'primary' | 'featured' }>;
+        albumName: string;
+        spotifyId: string;
+        youtubeId: string;
+        genre: string[];
+        albumArt: string;
+      }> = [];
 
-      // Parse the incoming song data from the API.
-      const newSong = player.data.songs?.[0]
-        ? (() => {
-            const song = player.data.songs[0];
-            const originalArtistString = song.artists?.join(', ') || 'Unknown';
-            const parsedArtists = [];
-            if (song.artists && Array.isArray(song.artists) && song.artists.length > 0) {
-              // First artist is primary; subsequent artists are featured.
-              parsedArtists.push({ name: song.artists[0], role: 'primary' });
-              for (let i = 1; i < song.artists.length; i++) {
-                parsedArtists.push({ name: song.artists[i], role: 'featured' });
-              }
-            } else {
-              parsedArtists.push({ name: 'Unknown', role: 'primary' });
+      if (player.data.songs && Array.isArray(player.data.songs) && player.data.songs.length > 0) {
+        for (const song of player.data.songs) {
+          const originalArtistString = song.artists?.join(', ') || 'Unknown';
+          const parsedArtists: Array<{ name: string; role: 'primary' | 'featured' }> = [];
+          if (song.artists && Array.isArray(song.artists) && song.artists.length > 0) {
+            // First artist is primary; subsequent artists are featured
+            parsedArtists.push({ name: song.artists[0], role: 'primary' as const });
+            for (let i = 1; i < song.artists.length; i++) {
+              parsedArtists.push({ name: song.artists[i], role: 'featured' as const });
             }
-            return {
-              id: song.id,
-              songName: song.title,
-              artistName: originalArtistString,
-              artists: parsedArtists,
-              albumName: 'Unknown',
-              spotifyId: null,
-              youtubeId: null,
-              genre: [],
-              albumArt: song.spotify_image || null
-            };
-          })()
-        : null;
+          } else {
+            parsedArtists.push({ name: 'Unknown', role: 'primary' as const });
+          }
 
-      // If there is no new song data, exit early.
-      if (!newSong) {
-        console.log("No song data available in API response.");
+          // Create normalized song object with consistent structure
+          const normalizedSong = {
+            id: song.id || '',
+            songName: song.title || '',
+            artistName: originalArtistString,
+            artists: parsedArtists,
+            albumName: '',
+            spotifyId: '',
+            youtubeId: '',
+            genre: [],
+            albumArt: song.spotify_image || ''
+          };
+
+          newSongs.push(normalizedSong);
+        }
+      }
+
+      // If there is no song data, exit early
+      if (newSongs.length === 0) {
+        console.log(`No song data available in API response for ${player.data.name}.`);
         return;
       }
 
-      if (existingPlayer) {
-        // Check whether this new song is already in the walkupSongs array.
-        const songAlreadyExists = existingPlayer.walkupSongs.some(
-          (song: { id: string }) => song.id === newSong.id
-        );
+      // Try to find an existing player document by its API id
+      const existingPlayer = await Player.findOne({ id: player.data.id });
 
-        // Build the update object, explicitly omitting position
+      if (existingPlayer) {
+        // Build the update object
         const updateObj = {
           mlbId: player.data.mlb_id,
           name: player.data.name,
@@ -472,15 +459,74 @@ export class WalkupSongService {
           lastUpdated: new Date()
         };
 
-        // Only add the song to walkupSongs if it isn't already present.
-        const updateQuery = {
-          $set: updateObj,
-          ...(!songAlreadyExists ? { $addToSet: { walkupSongs: newSong } } : {})
-        };
+        // --- Enhanced Debugging for ID Comparison ---
+        console.log(`\n=== DEBUG: ID Comparison for ${player.data.name} ===`);
 
-        await Player.updateOne({ id: player.data.id }, updateQuery);
+        // Log existing songs with detailed ID information
+        console.log('\nExisting Songs in DB:');
+        existingPlayer.walkupSongs.forEach((song, index) => {
+          console.log(`[${index}] ID: "${song.id}" (type: ${typeof song.id}, length: ${song.id?.length})`);
+          console.log(`    Song: "${song.songName}"`);
+          console.log(`    Artist: "${song.artistName}"`);
+        });
+
+        // Create the Set of existing IDs with detailed logging
+        const existingSongIds = new Set(existingPlayer.walkupSongs.map(song => String(song.id)));
+        console.log('\nSet of existing song IDs:');
+        existingSongIds.forEach(id => {
+          console.log(`- "${id}" (type: ${typeof id}, length: ${id?.length})`);
+        });
+
+        // Log incoming songs with detailed ID information
+        console.log('\nIncoming Songs from API:');
+        newSongs.forEach((song, index) => {
+          // Convert ID to string if it isn't already
+          const stringId = String(song.id);
+          console.log(`[${index}] ID: "${stringId}" (type: ${typeof stringId}, length: ${stringId?.length})`);
+          console.log(`    Song: "${song.songName}"`);
+          console.log(`    Artist: "${song.artistName}"`);
+        });
+
+        // Enhanced filtering with detailed comparison logging
+        const filteredNewSongs = newSongs.filter(apiSong => {
+          const songIdFromApi = String(apiSong.id); // Convert to string
+          const isDuplicate = existingSongIds.has(songIdFromApi);
+          
+          console.log(`\nComparing song "${apiSong.songName}":`);
+          console.log(`- API ID: "${songIdFromApi}" (type: ${typeof songIdFromApi}, length: ${songIdFromApi?.length})`);
+          console.log(`- Exists in DB? ${isDuplicate}`);
+          
+          if (!isDuplicate) {
+            console.log('  -> Will be added as new song');
+          } else {
+            console.log('  -> Will be skipped as duplicate');
+          }
+          
+          return !isDuplicate;
+        });
+
+        console.log(`\nFiltering Results:`);
+        console.log(`- Total incoming songs: ${newSongs.length}`);
+        console.log(`- Songs to be added: ${filteredNewSongs.length}`);
+        console.log(`- Duplicates found: ${newSongs.length - filteredNewSongs.length}`);
+
+        // Update only if there are any new songs to add
+        if (filteredNewSongs.length > 0) {
+          console.log(`\nAttempting to add ${filteredNewSongs.length} new songs for ${player.data.name}`);
+          await Player.updateOne(
+            { id: player.data.id },
+            {
+              $set: updateObj,
+              $push: { walkupSongs: { $each: filteredNewSongs } }
+            }
+          );
+          console.log(`Successfully added ${filteredNewSongs.length} new songs for player ${player.data.name}`);
+        } else {
+          console.log(`\nNo new songs to add for ${player.data.name} (all ${newSongs.length} songs from API already exist in DB)`);
+        }
       } else {
         // For a new player, create a document with an empty position
+        console.log(`New player created for ${player.data.name} with ${newSongs.length} songs.`);
         const newPlayer = new Player({
           id: player.data.id,
           mlbId: player.data.mlb_id,
@@ -489,12 +535,13 @@ export class WalkupSongService {
           team: player.data.team?.name || 'Unknown',
           teamId: player.data.team?.id || 'Unknown',
           lastUpdated: new Date(),
-          walkupSongs: [newSong]
+          walkupSongs: newSongs
         });
         await newPlayer.save();
+        console.log(`Successfully saved new player ${player.data.name}.`);
       }
     } catch (error) {
-      console.error('Error saving player to MongoDB:', error);
+      console.error(`Error saving player ${player?.data?.name || 'UNKNOWN'}:`, error);
       throw error;
     }
   }
@@ -503,11 +550,8 @@ export class WalkupSongService {
     try {
       const players = await Player.find({});
       return players.map(player => {
-        // Get all walkup songs (both from walkupSong field and walkupSongs array)
-        const allWalkupSongs = [
-          player.walkupSong,
-          ...(player.walkupSongs || [])
-        ].filter(Boolean);
+        // Retrieve only from walkupSongs array, as legacy walkupSong has been removed.
+        const allWalkupSongs = player.walkupSongs || [];
 
         // Process each walkup song
         const processedWalkupSongs = allWalkupSongs.map(song => ({
@@ -528,8 +572,7 @@ export class WalkupSongService {
           position: player.position,
           team: player.team,
           teamId: player.teamId,
-          walkupSong: processedWalkupSongs[0], // Keep the first song as the primary walkup song
-          walkupSongs: processedWalkupSongs, // Include all walkup songs
+          walkupSongs: processedWalkupSongs,
           stats: {
             batting: {
               battingAvg: player.stats?.batting?.battingAvg || 0,
@@ -553,24 +596,15 @@ export class WalkupSongService {
   public async getPlayerById(playerId: string): Promise<PlayerWalkupSong | null> {
     try {
       const player = await Player.findOne({ id: playerId });
-      if (!player || !player.walkupSong) return null;
+      if (!player || !player.walkupSongs || player.walkupSongs.length === 0) return null;
+      // Return the first song from walkupSongs array as the primary song, if needed.
       return {
         playerId: player.id,
         playerName: player.name,
         position: player.position,
         team: player.team,
         teamId: player.teamId,
-        walkupSong: {
-          id: player.walkupSong.id,
-          songName: player.walkupSong.songName,
-          artistName: player.walkupSong.artistName,
-          artists: player.walkupSong.artists || [{ name: 'Unknown', role: 'primary' }],
-          albumName: player.walkupSong.albumName || '',
-          spotifyId: player.walkupSong.spotifyId || '',
-          youtubeId: player.walkupSong.youtubeId || '',
-          genre: player.walkupSong.genre || [],
-          albumArt: player.walkupSong.albumArt || ''
-        }
+        walkupSong: player.walkupSongs[0]
       };
     } catch (error) {
       console.error(`Error fetching player ${playerId} from MongoDB:`, error);
@@ -582,7 +616,7 @@ export class WalkupSongService {
     try {
       const players = await Player.find({ teamId });
       return players.map(player => {
-        if (!player.walkupSong) {
+        if (!player.walkupSongs || player.walkupSongs.length === 0) {
           throw new Error(`Player ${player.id} has no walkup song data`);
         }
         return {
@@ -591,17 +625,7 @@ export class WalkupSongService {
           position: player.position,
           team: player.team,
           teamId: player.teamId,
-          walkupSong: {
-            id: player.walkupSong.id,
-            songName: player.walkupSong.songName,
-            artistName: player.walkupSong.artistName,
-            artists: player.walkupSong.artists || [{ name: 'Unknown', role: 'primary' }],
-            albumName: player.walkupSong.albumName || '',
-            spotifyId: player.walkupSong.spotifyId || '',
-            youtubeId: player.walkupSong.youtubeId || '',
-            genre: player.walkupSong.genre || [],
-            albumArt: player.walkupSong.albumArt || ''
-          }
+          walkupSong: player.walkupSongs[0]
         };
       });
     } catch (error) {
@@ -614,7 +638,7 @@ export class WalkupSongService {
     try {
       const players = await Player.find({ position });
       return players.map(player => {
-        if (!player.walkupSong) {
+        if (!player.walkupSongs || player.walkupSongs.length === 0) {
           throw new Error(`Player ${player.id} has no walkup song data`);
         }
         return {
@@ -623,16 +647,7 @@ export class WalkupSongService {
           position: player.position,
           team: player.team,
           teamId: player.teamId,
-          walkupSong: {
-            id: player.walkupSong.id,
-            songName: player.walkupSong.songName,
-            artistName: player.walkupSong.artistName,
-            albumName: player.walkupSong.albumName || '',
-            spotifyId: player.walkupSong.spotifyId || '',
-            youtubeId: player.walkupSong.youtubeId || '',
-            genre: player.walkupSong.genre || [],
-            albumArt: player.walkupSong.albumArt || ''
-          }
+          walkupSong: player.walkupSongs[0]
         };
       });
     } catch (error) {
@@ -687,9 +702,6 @@ export class WalkupSongService {
     const validationResults = await Promise.all(
       allPlayerSongs.map(async player => {
         const isValid = await this.validatePlayerStats(player);
-        if (!isValid) {
-        
-        }
         return { player, isValid };
       })
     );
@@ -697,22 +709,19 @@ export class WalkupSongService {
     const validPlayers = validationResults
       .filter(({ player, isValid }) => {
         // Basic walkup song validation
-        const hasValidWalkupSong = player.walkupSong &&
-          player.walkupSong.songName &&
-          player.walkupSong.artistName &&
-          player.walkupSong.songName !== 'No walkup song';
+        const hasValidWalkupSong = player.walkupSongs && player.walkupSongs.length > 0 &&
+          player.walkupSongs[0].songName &&
+          player.walkupSongs[0].artistName &&
+          player.walkupSongs[0].songName !== 'No walkup song';
         
         if (!hasValidWalkupSong) {
-        
           return false;
         }
 
         if (!isValid) {
-         
           return false;
         }
         
-     
         return true;
       })
       .map(({ player }) => player);
@@ -993,8 +1002,8 @@ export class WalkupSongService {
       matchScore: adjustedScore,
       matchingSongs: candidate.matchingSongs?.map(song => ({
         ...song,
-        albumArt: song.albumArt || candidate.player.walkupSong.albumArt || '',
-        previewUrl: song.previewUrl || candidate.player.walkupSong.previewUrl || undefined
+        albumArt: song.albumArt || candidate.player.walkupSongs[0].albumArt || '',
+        previewUrl: song.previewUrl || candidate.player.walkupSongs[0].previewUrl || undefined
       }))
     };
   }
@@ -1024,7 +1033,7 @@ export class WalkupSongService {
   private getArtistCountInTeam(artist: string, team: { [position: string]: TeamAssignment }): number {
     let count = 0;
     for (const pos in team) {
-      if (team[pos].candidate.player.walkupSong.artistName === artist) {
+      if (team[pos].candidate.player.walkupSongs[0].artistName === artist) {
         count++;
       }
     }
