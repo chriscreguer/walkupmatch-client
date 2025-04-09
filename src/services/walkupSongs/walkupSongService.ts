@@ -1217,7 +1217,7 @@ export class WalkupSongService {
       for (let i = 1; i < sortedMatches.length; i++) {
         // Each additional unique artist match contributes less to the bonus
         const match = sortedMatches[i];
-        const qualityFactor = match.rank <= 25 ? 1.0 : 0.5; // Higher quality matches contribute more
+        const qualityFactor = match.rank <= 25 ? .2 : 0.1; // Higher quality matches contribute more
         multipleArtistBonus += (this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS * qualityFactor) / i;
       }
       
