@@ -139,6 +139,7 @@ interface PlayerWithScore {
     rankInfo: string;
     albumArt: string;
     previewUrl?: string | null;
+    spotifyId?: string;
   }>;
 }
 
@@ -167,6 +168,7 @@ interface APIResponse {
       id: string;
       title: string;
       artists: string[];
+      spotify_id?: string;
       spotify_image?: string;
     }>;
   };
@@ -430,11 +432,18 @@ export class WalkupSongService {
             artistName: originalArtistString,
             artists: parsedArtists,
             albumName: '',
-            spotifyId: '',
+            // Map spotify_id from API to spotifyId in schema
+            spotifyId: song.spotify_id || '',
             youtubeId: '',
             genre: [],
             albumArt: song.spotify_image || ''
           };
+
+          console.log(`\nDEBUG: Normalized song data for "${song.title}":`, {
+            id: normalizedSong.id,
+            spotifyId: normalizedSong.spotifyId,
+            hasSpotifyId: !!normalizedSong.spotifyId
+          });
 
           newSongs.push(normalizedSong);
         }
@@ -468,6 +477,7 @@ export class WalkupSongService {
           console.log(`[${index}] ID: "${song.id}" (type: ${typeof song.id}, length: ${song.id?.length})`);
           console.log(`    Song: "${song.songName}"`);
           console.log(`    Artist: "${song.artistName}"`);
+          console.log(`    Spotify ID: "${song.spotifyId}"`);
         });
 
         // Create the Set of existing IDs with detailed logging
@@ -485,6 +495,7 @@ export class WalkupSongService {
           console.log(`[${index}] ID: "${stringId}" (type: ${typeof stringId}, length: ${stringId?.length})`);
           console.log(`    Song: "${song.songName}"`);
           console.log(`    Artist: "${song.artistName}"`);
+          console.log(`    Spotify ID: "${song.spotifyId}"`);
         });
 
         // Enhanced filtering with detailed comparison logging
@@ -494,6 +505,7 @@ export class WalkupSongService {
           
           console.log(`\nComparing song "${apiSong.songName}":`);
           console.log(`- API ID: "${songIdFromApi}" (type: ${typeof songIdFromApi}, length: ${songIdFromApi?.length})`);
+          console.log(`- Spotify ID: "${apiSong.spotifyId}"`);
           console.log(`- Exists in DB? ${isDuplicate}`);
           
           if (!isDuplicate) {
@@ -512,17 +524,87 @@ export class WalkupSongService {
 
         // Update only if there are any new songs to add
         if (filteredNewSongs.length > 0) {
-          console.log(`\nAttempting to add ${filteredNewSongs.length} new songs for ${player.data.name}`);
+          console.log(`\nDEBUG: Attempting to add ${filteredNewSongs.length} new songs for ${player.data.name}`);
+          console.log('DEBUG: First song data being saved:', {
+            id: filteredNewSongs[0].id,
+            spotifyId: filteredNewSongs[0].spotifyId,
+            hasSpotifyId: !!filteredNewSongs[0].spotifyId
+          });
+
+          // First, update existing songs with spotifyId if available
+          const existingSongs = existingPlayer.walkupSongs;
+          const updatedExistingSongs = existingSongs.map(existingSong => {
+            // Skip if song already has a spotifyId
+            if (existingSong.spotifyId) {
+              console.log(`DEBUG: Skipping spotifyId update for song "${existingSong.songName}" - already has ID: ${existingSong.spotifyId}`);
+              return existingSong.toObject();
+            }
+            
+            const matchingNewSong = newSongs.find(newSong => newSong.id === existingSong.id);
+            if (matchingNewSong && matchingNewSong.spotifyId) {
+              console.log(`DEBUG: Updating spotifyId for song "${existingSong.songName}" - new ID: ${matchingNewSong.spotifyId}`);
+              return {
+                ...existingSong.toObject(),
+                spotifyId: matchingNewSong.spotifyId
+              };
+            }
+            return existingSong.toObject();
+          });
+
+          // Then add new songs
           await Player.updateOne(
             { id: player.data.id },
             {
-              $set: updateObj,
+              $set: {
+                ...updateObj,
+                walkupSongs: updatedExistingSongs
+              },
               $push: { walkupSongs: { $each: filteredNewSongs } }
             }
           );
-          console.log(`Successfully added ${filteredNewSongs.length} new songs for player ${player.data.name}`);
+
+          // Verify the update
+          const updatedPlayer = await Player.findOne({ id: player.data.id });
+          if (updatedPlayer) {
+            const lastAddedSong = updatedPlayer.walkupSongs[updatedPlayer.walkupSongs.length - 1];
+            console.log('DEBUG: Last added song in database:', {
+              id: lastAddedSong.id,
+              spotifyId: lastAddedSong.spotifyId,
+              hasSpotifyId: !!lastAddedSong.spotifyId
+            });
+          }
         } else {
           console.log(`\nNo new songs to add for ${player.data.name} (all ${newSongs.length} songs from API already exist in DB)`);
+          
+          // Even if no new songs, update spotifyId for existing songs
+          const existingSongs = existingPlayer.walkupSongs;
+          const updatedExistingSongs = existingSongs.map(existingSong => {
+            // Skip if song already has a spotifyId
+            if (existingSong.spotifyId) {
+              console.log(`DEBUG: Skipping spotifyId update for song "${existingSong.songName}" - already has ID: ${existingSong.spotifyId}`);
+              return existingSong.toObject();
+            }
+            
+            const matchingNewSong = newSongs.find(newSong => newSong.id === existingSong.id);
+            if (matchingNewSong && matchingNewSong.spotifyId) {
+              console.log(`DEBUG: Updating spotifyId for song "${existingSong.songName}" - new ID: ${matchingNewSong.spotifyId}`);
+              return {
+                ...existingSong.toObject(),
+                spotifyId: matchingNewSong.spotifyId
+              };
+            }
+            return existingSong.toObject();
+          });
+
+          await Player.updateOne(
+            { id: player.data.id },
+            {
+              $set: {
+                ...updateObj,
+                walkupSongs: updatedExistingSongs
+              }
+            }
+          );
         }
       } else {
         // For a new player, create a document with an empty position
@@ -672,7 +754,8 @@ export class WalkupSongService {
     userTopArtists: { short_term: SpotifyTopItem[]; medium_term: SpotifyTopItem[]; long_term: SpotifyTopItem[] },
     userSavedTracks: SpotifyTopItem[],
     positions: Position[],
-    userSavedAlbums: SpotifyTopItem[] = []
+    userSavedAlbums: SpotifyTopItem[] = [],
+    accessToken: string
   ): Promise<PlayerWalkupSong[]> {
     // Get Tigers' games played for validation
     try {
@@ -728,6 +811,42 @@ export class WalkupSongService {
     
     console.log('Players after filtering:', validPlayers.length);
 
+    // --- OPTION A IMPLEMENTATION ---
+    // 1. Collect all unique Spotify IDs from ALL songs of stat-qualified players
+    const allSpotifyIdsToCheck = new Set<string>();
+    validPlayers.forEach(player => {
+        player.walkupSongs?.forEach(song => {
+            if (song.spotifyId) {
+                allSpotifyIdsToCheck.add(song.spotifyId);
+            }
+        });
+    });
+    const uniqueSpotifyIdsArray = Array.from(allSpotifyIdsToCheck);
+    console.log(`Found ${uniqueSpotifyIdsArray.length} unique Spotify IDs from stat-qualified players to check.`);
+
+    // 2. Perform the single batched check using checkSongsInLikedTracks
+    let likedTrackIdSet = new Set<string>(); // Initialize empty
+    if (uniqueSpotifyIdsArray.length > 0) {
+        try {
+            console.log('Starting batch check for liked songs...');
+            const likedStatusArray = await this.checkSongsInLikedTracks(uniqueSpotifyIdsArray, accessToken);
+            console.log('Finished batch check.');
+
+            // 3. Store the liked IDs in a Set for fast lookup
+            likedTrackIdSet = new Set<string>();
+            uniqueSpotifyIdsArray.forEach((id, index) => {
+                if (likedStatusArray[index]) {
+                    likedTrackIdSet.add(id);
+                }
+            });
+            console.log(`Found ${likedTrackIdSet.size} liked songs among the checked IDs.`);
+        } catch (error) {
+            console.error("Failed to perform batch check for liked songs, proceeding without liked song data:", error);
+        }
+    } else {
+        console.log("No Spotify IDs found in player data to check.");
+    }
+    // --- END OPTION A IMPLEMENTATION ---
 
     // Normalize user preferences
     const userTopGenres = userGenres.slice(0, 10).map(g => ({
@@ -780,22 +899,8 @@ export class WalkupSongService {
       }
     });
 
-    // NEW: Create a map of artists with saved albums
-    const normalizedSavedAlbums: NormalizedAlbum[] = userSavedAlbums.map(album => ({
-      id: album.id || '',
-      name: (album.name || '').toLowerCase(),
-      artistName: (album.artists?.[0]?.name || '').toLowerCase()
-    }));
-    
-    const artistsWithSavedAlbums = new Set<string>();
-    normalizedSavedAlbums.forEach(album => {
-      if (album.artistName) {
-        artistsWithSavedAlbums.add(album.artistName);
-      }
-    });
-
     // Calculate match scores for valid players
-    const playersWithScores: PlayerWithScore[] = validPlayers.map(player => {
+    const playersWithScoresPromises: Promise<PlayerWithScore>[] = validPlayers.map(async (player): Promise<PlayerWithScore> => {
       if (!player.walkupSongs || player.walkupSongs.length === 0) {
         return {
           player,
@@ -808,7 +913,7 @@ export class WalkupSongService {
       }
 
       // Process each walkup song and find its best match
-      const matchingSongs = player.walkupSongs.map(song => {
+      const matchingSongsPromises = player.walkupSongs.map(async song => {
         const normalizedPlayerSong = {
           name: song.songName.toLowerCase(),
           artist: song.artistName.toLowerCase(),
@@ -817,7 +922,12 @@ export class WalkupSongService {
         };
         
         // Find all possible matches for this song
-        const songMatches = this.findAllSongMatches(normalizedPlayerSong, normalizedUserTracks, normalizedSavedTracks);
+        const songMatches = await this.findAllSongMatches(
+          normalizedPlayerSong,
+          normalizedUserTracks,
+          likedTrackIdSet,
+          accessToken
+        );
         const artistMatches = this.findAllArtistMatches(normalizedPlayerSong, normalizedUserTracks, normalizedUserArtists, savedTracksMap);
         const genreMatch = this.calculateGenreMatchScore(
           userTopGenres, 
@@ -846,15 +956,16 @@ export class WalkupSongService {
           matchReason: bestMatch.reason,
           rankInfo: bestMatch.details || '',
           albumArt: song.albumArt || '',
-          previewUrl: song.previewUrl || undefined
+          previewUrl: song.previewUrl || undefined,
+          spotifyId: song.spotifyId
         };
       });
 
       // Sort songs by match score
-      const sortedSongs = matchingSongs.sort((a, b) => b.matchScore - a.matchScore);
+      const sortedSongs = await Promise.all(matchingSongsPromises);
       
       // Get the primary song (highest scoring)
-      const primarySong = sortedSongs[0];
+      const primarySong = sortedSongs.sort((a, b) => b.matchScore - a.matchScore)[0];
       
       // Filter secondary songs with higher threshold
       const secondarySongs = sortedSongs.slice(1).filter(song => 
@@ -897,9 +1008,25 @@ export class WalkupSongService {
         originalMatchScore: finalPlayerScore,
         matchReason: primarySong.matchReason,
         rankInfo: primarySong.rankInfo,
-        matchingSongs: qualifyingSongs
+        matchingSongs: qualifyingSongs.map(s => ({
+          songName: s.songName,
+          artistName: s.artistName,
+          matchScore: s.matchScore,
+          matchReason: s.matchReason,
+          rankInfo: s.rankInfo,
+          albumArt: s.albumArt,
+          previewUrl: s.previewUrl,
+          spotifyId: s.spotifyId
+        }))
       };
-    }).filter(p => p.matchScore >= this.MIN_MATCH_SCORE)
+    });
+
+    // Wait for all player processing promises to resolve
+    const playersWithScoresResolved: PlayerWithScore[] = await Promise.all(playersWithScoresPromises);
+
+    // Filter and sort the resolved results
+    const playersWithScores = playersWithScoresResolved
+      .filter(p => p.matchScore >= this.MIN_MATCH_SCORE)
       .sort((a, b) => b.matchScore - a.matchScore);
 
     // ----- FIRST PASS: Greedy Assignment with Uniqueness -----
@@ -1069,13 +1196,106 @@ export class WalkupSongService {
   }
 
   /**
+   * Check if multiple songs are in the user's liked tracks using Spotify API
+   */
+  private async checkSongsInLikedTracks(
+    spotifyIds: string[],
+    accessToken: string
+  ): Promise<boolean[]> {
+    if (!spotifyIds || spotifyIds.length === 0 || spotifyIds.every(id => !id)) {
+      console.warn('checkSongsInLikedTracks called with empty or invalid IDs');
+      return []; // Return empty array if no valid IDs
+    }
+
+    const validIds = spotifyIds.filter(id => id); // Filter out null/empty IDs
+    if (validIds.length === 0) {
+      return spotifyIds.map(() => false); // Return false for all original IDs if no valid ones remain
+    }
+
+    try {
+      const batchSize = 50; // Spotify API limit
+      const resultsMap = new Map<string, boolean>(); // Use map to handle potential duplicates/order issues
+
+      for (let i = 0; i < validIds.length; i += batchSize) {
+        const batch = validIds.slice(i, i + batchSize);
+        
+        console.log(`\nDEBUG: Checking Spotify IDs in batch:`, {
+          batchSize: batch.length,
+          firstId: batch[0],
+          accessTokenLength: accessToken?.length,
+          accessTokenPrefix: accessToken?.substring(0, 10) + '...'
+        });
+
+        const apiUrl = `https://api.spotify.com/v1/me/tracks/contains?ids=${batch.join(',')}`;
+        console.log(`DEBUG: Spotify API URL:`, apiUrl);
+
+        const response = await axios.get<boolean[]>(
+          apiUrl,
+          {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`
+            }
+          }
+        );
+
+        console.log(`DEBUG: Spotify API Response:`, {
+          status: response.status,
+          statusText: response.statusText,
+          dataLength: response.data?.length,
+          data: response.data
+        });
+
+        // The response is an array of booleans corresponding to the batch IDs
+        if (response.data && Array.isArray(response.data) && response.data.length === batch.length) {
+          batch.forEach((id, index) => {
+            resultsMap.set(id, response.data[index]);
+            console.log(`DEBUG: Track ID ${id} is ${response.data[index] ? 'liked' : 'not liked'}`);
+          });
+        } else {
+          console.error('Unexpected response format from Spotify /me/tracks/contains:', response.data);
+          // Mark all in this batch as false on error
+          batch.forEach(id => {
+            resultsMap.set(id, false);
+            console.log(`DEBUG: Marking track ID ${id} as not liked due to unexpected response format`);
+          });
+        }
+      }
+
+      // Map results back to the original spotifyIds array structure
+      const finalResults = spotifyIds.map(id => resultsMap.get(id) ?? false);
+      
+      console.log(`\nDEBUG: Final results for all tracks:`, {
+        totalTracks: spotifyIds.length,
+        validTracks: validIds.length,
+        likedTracks: finalResults.filter(Boolean).length,
+        results: finalResults
+      });
+
+      return finalResults;
+
+    } catch (error) {
+      console.error('Error checking songs in liked tracks:', error instanceof Error ? error.message : error);
+      if (axios.isAxiosError(error) && error.response) {
+        console.error('Spotify API Error Response:', {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data
+        });
+      }
+      // Return false for all original IDs on error
+      return spotifyIds.map(() => false);
+    }
+  }
+
+  /**
    * Find all possible song matches for a player.
    */
-  private findAllSongMatches(
-    playerSong: { name: string; artist: string; genres: string[] },
+  private async findAllSongMatches(
+    playerSong: { name: string; artist: string; genres: string[]; spotifyId?: string },
     userTracks: Record<TimeFrame, NormalizedTrack[]>,
-    userSavedTracks: NormalizedTrack[]
-  ): MatchResult[] {
+    likedTrackIdSet: Set<string>,
+    accessToken: string
+  ): Promise<MatchResult[]> {
     const matches: MatchResult[] = [];
     const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
     
@@ -1103,19 +1323,13 @@ export class WalkupSongService {
       }
     }
     
-    // Check for song in user's saved tracks
-    const artistList = playerSong.artist.split(',').map(a => a.trim().toLowerCase());
-    for (const artistName of artistList) {
-      const savedMatch = userSavedTracks.find(track => 
-        track.name === playerSong.name && track.artist === artistName);
-      
-      if (savedMatch) {
-        matches.push({ 
-          score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG, 
-          reason: 'Liked song' 
+    // Check if song is in the pre-fetched set of liked tracks
+    if (playerSong.spotifyId && likedTrackIdSet.has(playerSong.spotifyId)) {
+        console.log(`DEBUG: Matched liked song (local check): ${playerSong.name} (${playerSong.spotifyId})`);
+        matches.push({
+            score: this.SCORE_WEIGHTS.MATCH_TYPE.LIKED_SONG,
+            reason: 'Liked song'
         });
-        break; // No need to check other artists if we found a match
-      }
     }
     
     return matches;
@@ -1201,12 +1415,7 @@ export class WalkupSongService {
     
     // Add multiple artist bonus if we have more than one unique artist match
     if (matchedArtists.size > 1) {
-      // Log details about multiple artist matches
-      console.log(`\nMultiple artist matches found for song: ${playerSong.name}`);
-      console.log('Song artists:', artistList.map(a => `${a.name} (${a.role})`).join(', '));
-      console.log('Matched artists:', Array.from(matchedArtists.entries()).map(([name, match]) => 
-        `${name}: #${match.rank} in ${match.timeFrame} (score: ${match.score})`
-      ).join(', '));
+
       
       // Sort matches by score to get the highest scoring match
       const sortedMatches = Array.from(matchedArtists.values()).sort((a, b) => b.score - a.score);
