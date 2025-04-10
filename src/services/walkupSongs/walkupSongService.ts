@@ -935,26 +935,53 @@ export class WalkupSongService {
           normalizedPlayerSong.artist,
           artistsWithLikedSongs
         );
-        
-        // Get the best match for this song
-        const allMatches = [
-          ...songMatches,
-          ...artistMatches,
-          genreMatch.score > 0 ? genreMatch : null
-        ].filter(Boolean) as MatchResult[];
-        
-        const bestMatch = allMatches.sort((a, b) => b.score - a.score)[0] || { 
-          score: 0, 
-          reason: 'No match found',
-          details: ''
-        };
+
+        // Get the best score within each category
+        const bestSongMatch = songMatches.sort((a, b) => b.score - a.score)[0];
+        const bestArtistMatch = artistMatches.sort((a, b) => b.score - a.score)[0];
+
+        // Store the calculated scores and their context
+        const potentialMatches = [
+          { type: 'Song', score: bestSongMatch?.score ?? 0, reason: bestSongMatch?.reason, details: bestSongMatch?.details },
+          { type: 'Artist', score: bestArtistMatch?.score ?? 0, reason: bestArtistMatch?.reason, details: bestArtistMatch?.details },
+          { type: 'Genre', score: genreMatch?.score ?? 0, reason: genreMatch?.reason, details: genreMatch?.details }
+        ];
+
+        // Filter out matches with no score and sort by score descending
+        const validMatches = potentialMatches
+          .filter(m => m.score > 0.001) // Use a small threshold to avoid floating point issues
+          .sort((a, b) => b.score - a.score);
+
+        let finalCombinedScore = 0;
+        let finalReason = 'No match';
+        let finalDetails = '';
+
+        if (validMatches.length > 0) {
+          // Identify the primary match (highest score)
+          const primaryMatch = validMatches[0];
+
+          // Calculate the sum of the scores of the other matches
+          const sumOfOtherScores = validMatches.slice(1).reduce((sum, match) => sum + match.score, 0);
+
+          // Calculate the final score based on the formula: PrimaryScore + 0.05 * (Sum of Others)
+          finalCombinedScore = primaryMatch.score + (0.05 * sumOfOtherScores);
+
+          // Construct Reason and Details
+          finalReason = primaryMatch.reason || 'Primary Match';
+          finalDetails = primaryMatch.details || '';
+          if (sumOfOtherScores > 0.001 && validMatches.length > 1) {
+            // Indicate that other factors contributed a bonus
+            const otherReasons = validMatches.slice(1).map(m => m.reason || m.type).join(', ');
+            finalReason += ` (+ bonus from: ${otherReasons.substring(0, 50)}${otherReasons.length > 50 ? '...' : ''})`;
+          }
+        }
 
         return {
           songName: song.songName,
           artistName: song.artistName,
-          matchScore: bestMatch.score,
-          matchReason: bestMatch.reason,
-          rankInfo: bestMatch.details || '',
+          matchScore: finalCombinedScore,
+          matchReason: finalReason,
+          rankInfo: finalDetails,
           albumArt: song.albumArt || '',
           previewUrl: song.previewUrl || undefined,
           spotifyId: song.spotifyId
