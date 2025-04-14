@@ -222,25 +222,41 @@ export class WalkupSongService {
           TOP_25: 0.1,
           TOP_50: 0
       },
+      ARTIST_RANK_BONUS: {
+          SHORT_TERM: [
+              { threshold: 5, bonus: 0.20 },  // Strong boost top 5
+              { threshold: 15, bonus: 0.10 }, // Moderate boost top 15
+              { threshold: 30, bonus: 0.0 },  // No boost/penalty 16-30
+          ],
+          MEDIUM_TERM: [
+              { threshold: 10, bonus: 0.2 },
+              { threshold: 25, bonus: 0.1 },
+              { threshold: 50, bonus: 0.0 },
+          ],
+          LONG_TERM: [
+              { threshold: 10, bonus: 0.2 },
+              { threshold: 25, bonus: 0.1 },
+              { threshold: 50, bonus: 0.0 },
+          ]
+      },
       MATCH_TYPE: {
           LIKED_SONG: 1.2,
           TOP_SONG: 1.5,
           TOP_ARTIST: 0.8,
           FEATURE: 0.6,
-          GENRE: 0.4 // Base weight for genre contribution
+          GENRE: 0.4
       },
-      ARTIST_DIVERSITY_PENALTY: { // Used in team selection
+      ARTIST_DIVERSITY_PENALTY: {
           FIRST: 0.0,
           SECOND: 0.4,
           THIRD: 0.6,
           FOURTH: 0.7,
           FIFTH_PLUS: 0.8
       },
-      MULTIPLE_MATCHES_BONUS: 0.03, // Used in findAllArtistMatches
-      // GENRE_VARIETY_BONUS: 0.15, // Removed - Was unused and confusing
-      GENRE_ARTIST_LIKED_BONUS: 0.05, // Used in calculateGenreMatchScore
-      EXACT_GENRE_MATCH_BONUS: 0.05, // Used in calculateGenreMatchScore
-      SAVED_ALBUM_BONUS: 0.02 // Used...? (Seems unused currently)
+      MULTIPLE_MATCHES_BONUS: 0.03,
+      GENRE_ARTIST_LIKED_BONUS: 0.05,
+      EXACT_GENRE_MATCH_BONUS: 0.05,
+      SAVED_ALBUM_BONUS: 0.02
   };
 
   private constructor() {
@@ -1378,106 +1394,113 @@ export class WalkupSongService {
    */
   private findAllArtistMatches(
     playerSong: { name: string; artist: string; spotifyId?: string; artists?: Array<{ name: string; role: string }> },
-    userTracks: Record<TimeFrame, NormalizedTrack[]>, // Still needed? Potentially for liked artist check later?
+    userTracks: Record<TimeFrame, NormalizedTrack[]>,
     userArtists: Record<TimeFrame, NormalizedArtist[]>,
-    _savedTracksMap: Map<string, boolean> // Unused parameter, keep signature for now
+    _savedTracksMap: Map<string, boolean>
   ): MatchResult[] {
-    // ... (implementation unchanged, uses restored SCORE_WEIGHTS)
-      const matches: MatchResult[] = [];
-    const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
-    
-    // Check for feature match in song title first
-    const featureMatches = this.checkForFeatureMatch(playerSong.name, userArtists);
-    if (featureMatches.length > 0) {
-      matches.push(...featureMatches);
-    }
-    
-    // Get artist list, preferring structured data if available
-    const artistList = playerSong.artists && playerSong.artists.length > 0
-      ? playerSong.artists.map(a => ({
-          name: a.name.toLowerCase(),
-          role: a.role
-        }))
-      : playerSong.artist.split(',').map(a => ({
-          name: a.trim().toLowerCase(),
-          role: 'primary' // Default to primary for backward compatibility
-        }));
-    
-    // Track matches for multiple artist bonus calculation
-    const matchedArtists = new Map<string, { score: number; rank: number; timeFrame: TimeFrame }>();
-    
-    // Check each artist individually
-    for (const artist of artistList) {
-      let bestMatch: { score: number; rank: number; timeFrame: TimeFrame } | null = null;
-      
-      for (const timeFrame of timeFrames) {
-        const artists = userArtists[timeFrame];
-        // Find exact artist match
-        const matchedArtist = artists.find(userArtist => 
-          userArtist.name && artist.name && userArtist.name === artist.name);
-        
-        if (matchedArtist) {
-          // Regular artist match scoring with role consideration
-          const rank = matchedArtist.rank || 0;
-          const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
-          let rankBonus = 0;
-          if (rank <= 10) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_10;
-          else if (rank <= 25) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_25;
-          else if (rank <= 50) rankBonus = this.SCORE_WEIGHTS.RANK.TOP_50;
-          
-          // Adjust score based on artist role
-          const roleMultiplier = artist.role === 'primary' ? 1.0 : 0.8;
-          const rankPenalty = (timeFrame === 'medium_term' || timeFrame === 'long_term') && rank > 25 ? (rank - 25) * 0.01 : 0;
-          const baseScore = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus - rankPenalty;
-          const score = baseScore * roleMultiplier;
-          
-          // Only keep the best match for this artist across all timeframes
-          if (!bestMatch || score > bestMatch.score) {
-            bestMatch = { score, rank, timeFrame };
-          }
-        }
-      }
-      
-      if (bestMatch) {
-        matchedArtists.set(artist.name, bestMatch);
-        
-        const details = `#${bestMatch.rank} ${bestMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(bestMatch.timeFrame)}`}`;
-        matches.push({ 
-          score: bestMatch.score, 
-          reason: artist.role === 'primary' ? 'Top artist' : 'Featured artist', 
-          details, 
-          rank: bestMatch.rank, 
-          timeFrame: bestMatch.timeFrame 
-        });
-      }
-    }
-    
-    // Add multiple artist bonus if we have more than one unique artist match
-    if (matchedArtists.size > 1) {
-      // Sort matches by score to get the highest scoring match
-      const sortedArtistScores = Array.from(matchedArtists.values()).sort((a, b) => b.score - a.score);
-      const highestScore = sortedArtistScores[0].score;
-      
-      // Calculate bonus based on number of unique artist matches and their quality
-      let multipleArtistBonus = 0;
-      for (let i = 1; i < sortedArtistScores.length; i++) {
-        // Each additional unique artist match contributes less to the bonus
-        const match = sortedArtistScores[i];
-        const qualityFactor = match.rank <= 25 ? .2 : 0.1; // Higher quality matches contribute more
-        multipleArtistBonus += (this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS * qualityFactor) / i;
-      }
-      
-      // Add the bonus to the highest scoring match in the main `matches` array
-      if (multipleArtistBonus > 0) {
-        const bestMatchIndex = matches.findIndex(m => m.score === highestScore && (m.reason.includes('Top artist') || m.reason.includes('Featured artist')));
-        if (bestMatchIndex !== -1) {
-          matches[bestMatchIndex].score += multipleArtistBonus;
-          matches[bestMatchIndex].reason += ` (${matchedArtists.size} unique artists)`;
-        }
-      }
-    }
-    
-    return matches;
+    const matches: MatchResult[] = [];
+    const timeFrames: TimeFrame[] = ['long_term', 'medium_term', 'short_term'];
+    
+    // Check for feature match in song title first
+    const featureMatches = this.checkForFeatureMatch(playerSong.name, userArtists);
+    if (featureMatches.length > 0) {
+      matches.push(...featureMatches);
+    }
+    
+    // Get artist list, preferring structured data if available
+    const artistList = playerSong.artists && playerSong.artists.length > 0
+      ? playerSong.artists.map(a => ({
+          name: a.name.toLowerCase(),
+          role: a.role
+        }))
+      : playerSong.artist.split(',').map(a => ({
+          name: a.trim().toLowerCase(),
+          role: 'primary'
+        }));
+    
+    // Track matches for multiple artist bonus calculation
+    const matchedArtists = new Map<string, { score: number; rank: number; timeFrame: TimeFrame }>();
+    
+    // Check each artist individually
+    for (const artist of artistList) {
+      let bestMatch: { score: number; rank: number; timeFrame: TimeFrame } | null = null;
+      
+      for (const timeFrame of timeFrames) {
+        const artists = userArtists[timeFrame];
+        // Find exact artist match
+        const matchedArtist = artists.find(userArtist => 
+          userArtist.name && artist.name && userArtist.name === artist.name);
+        
+        if (matchedArtist) {
+          // Get the appropriate rank bonus array based on timeframe
+          const rankBonuses = this.SCORE_WEIGHTS.ARTIST_RANK_BONUS[
+            timeFrame === 'short_term' ? 'SHORT_TERM' :
+            timeFrame === 'medium_term' ? 'MEDIUM_TERM' : 'LONG_TERM'
+          ];
+          
+          // Find the applicable rank bonus
+          let rankBonus = 0;
+          for (const tier of rankBonuses) {
+            if (matchedArtist.rank <= tier.threshold) {
+              rankBonus = tier.bonus;
+              break;
+            }
+          }
+          
+          const timeFrameBonus = this.SCORE_WEIGHTS.TIME_FRAME[timeFrame];
+          
+          // Adjust score based on artist role
+          const roleMultiplier = artist.role === 'primary' ? 1.0 : 0.8;
+          const baseScore = this.SCORE_WEIGHTS.MATCH_TYPE.TOP_ARTIST + timeFrameBonus + rankBonus;
+          const score = baseScore * roleMultiplier;
+          
+          // Only keep the best match for this artist across all timeframes
+          if (!bestMatch || score > bestMatch.score) {
+            bestMatch = { score, rank: matchedArtist.rank, timeFrame };
+          }
+        }
+      }
+      
+      if (bestMatch) {
+        matchedArtists.set(artist.name, bestMatch);
+        
+        const details = `#${bestMatch.rank} ${bestMatch.timeFrame === 'long_term' ? 'all time' : `in ${this.getTimeFrameLabel(bestMatch.timeFrame)}`}`;
+        matches.push({ 
+          score: bestMatch.score, 
+          reason: artist.role === 'primary' ? 'Top artist' : 'Featured artist', 
+          details, 
+          rank: bestMatch.rank, 
+          timeFrame: bestMatch.timeFrame 
+        });
+      }
+    }
+    
+    // Add multiple artist bonus if we have more than one unique artist match
+    if (matchedArtists.size > 1) {
+      // Sort matches by score to get the highest scoring match
+      const sortedArtistScores = Array.from(matchedArtists.values()).sort((a, b) => b.score - a.score);
+      const highestScore = sortedArtistScores[0].score;
+      
+      // Calculate bonus based on number of unique artist matches and their quality
+      let multipleArtistBonus = 0;
+      for (let i = 1; i < sortedArtistScores.length; i++) {
+        // Each additional unique artist match contributes less to the bonus
+        const match = sortedArtistScores[i];
+        const qualityFactor = match.rank <= 25 ? .2 : 0.1; // Higher quality matches contribute more
+        multipleArtistBonus += (this.SCORE_WEIGHTS.MULTIPLE_MATCHES_BONUS * qualityFactor) / i;
+      }
+      
+      // Add the bonus to the highest scoring match in the main `matches` array
+      if (multipleArtistBonus > 0) {
+        const bestMatchIndex = matches.findIndex(m => m.score === highestScore && (m.reason.includes('Top artist') || m.reason.includes('Featured artist')));
+        if (bestMatchIndex !== -1) {
+          matches[bestMatchIndex].score += multipleArtistBonus;
+          matches[bestMatchIndex].reason += ` (${matchedArtists.size} unique artists)`;
+        }
+      }
+    }
+    
+    return matches;
   }
 
   /**
