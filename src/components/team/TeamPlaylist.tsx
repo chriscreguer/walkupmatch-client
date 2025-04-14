@@ -179,7 +179,7 @@ export function TeamPlaylist({ team, loading = false }: TeamPlaylistProps) {
                   </button>
                   <div className="flex flex-col min-w-0">
                     <span className="text-black font-medium truncate">{song.songName}</span>
-                    <span className="text-black text-opacity-70 text-sm truncate">{song.artistName}</span>
+                    <span className="text-black text-opacity-70 text-sm truncate">  {song.artists?.map(a => a.name).join(', ') ?? 'Unknown Artist'}</span>
                   </div>
                 </div>
                 
