@@ -1,51 +1,20 @@
-const mongoose = require('mongoose');
-const dotenv = require('dotenv');
-const path = require('path');
+import mongoose from 'mongoose';
+import { config } from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { Player, PlayerDocument, WalkupSongSubdocument } from '../models/playerModel.js';
 
 // Load environment variables from .env.local
-dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
-
-// Define types
-interface WalkupSong {
-  id: string;
-  songName: string;
-  artistName: string;
-  albumName?: string;
-  spotifyId?: string;
-  youtubeId?: string;
-  genre?: string[];
-  albumArt?: string;
-}
-
-interface PlayerDocument {
-  _id: any;
-  walkupSongs?: WalkupSong[];
-}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+config({ path: join(__dirname, '../../.env.local') });
 
 interface BulkWriteOperation {
   updateOne: {
-    filter: { _id: any };
-    update: { $set: { walkupSongs: WalkupSong[] } };
+    filter: { _id: mongoose.Types.ObjectId };
+    update: { $set: { walkupSongs: WalkupSongSubdocument[] } };
   };
 }
-
-// Define a simplified player schema (matching your production schema)
-const playerSchema = new mongoose.Schema({
-  id: { type: String, required: true },
-  name: { type: String, required: true },
-  walkupSongs: [{
-    id: { type: String, required: true },
-    songName: { type: String, required: true },
-    artistName: { type: String, required: true },
-    albumName: String,
-    spotifyId: String,
-    youtubeId: String,
-    genre: [String],
-    albumArt: String
-  }]
-});
-
-const Player = mongoose.models.Player || mongoose.model('Player', playerSchema);
 
 async function removeWalkupSongField() {
   try {
@@ -90,13 +59,13 @@ async function dedupeWalkupSongs() {
 
         const bulkOps = players.map((player: PlayerDocument) => {
           if (player.walkupSongs && Array.isArray(player.walkupSongs)) {
-            const uniqueSongsMap = new Map<string, WalkupSong>();
+            const uniqueSongsMap = new Map<string, WalkupSongSubdocument>();
             const originalCount = player.walkupSongs.length;
 
             for (const song of player.walkupSongs) {
               const key = song.id && song.id !== 'no-song'
                 ? song.id
-                : `${song.songName.toLowerCase()}|${song.artistName.toLowerCase()}`;
+                : `${song.songName.toLowerCase()}|${song.artists.map(a => a.name).join(', ').toLowerCase()}`;
               if (!uniqueSongsMap.has(key)) {
                 uniqueSongsMap.set(key, song);
               }

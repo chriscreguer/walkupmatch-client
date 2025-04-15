@@ -113,121 +113,113 @@ export class WalkupSongSyncService {
             const playerData = apiResponse.data;
             if (!playerData?.id || !playerData?.name || !playerData?.mlb_id) {
                 console.warn('WalkupSongSyncService: Invalid player data received from API, skipping save.', playerData);
-                 return 'skipped';
+                return 'skipped';
             }
 
             // --- Parse songs from API Data - START ---
             const newSongsFromApi: WalkupSongSubdocument[] = [];
             if (playerData.songs && Array.isArray(playerData.songs) && playerData.songs.length > 0) {
                 for (const apiSong of playerData.songs) {
+                    // Safely parse artists with better type checking
                     const parsedArtists: Array<{ name: string; role: 'primary' | 'featured' }> = [];
                     if (apiSong.artists && Array.isArray(apiSong.artists) && apiSong.artists.length > 0) {
-                        // Use the structured artist data from the API
+                        // Use .name property from the API artist object
                         parsedArtists.push({ name: apiSong.artists[0].name, role: 'primary' as const });
                         for (let i = 1; i < apiSong.artists.length; i++) {
+                            // Use .name property from the API artist object
                             parsedArtists.push({ name: apiSong.artists[i].name, role: 'featured' as const });
                         }
                     } else {
                         parsedArtists.push({ name: 'Unknown Artist', role: 'primary' as const });
                     }
 
-                    // Use optional chaining and provide defaults
                     const normalizedSong: WalkupSongSubdocument = {
-                        id: String(apiSong.id || `unknown-${Date.now()}`), // Ensure ID is string
-                        songName: apiSong.title || 'Unknown Song',
-                        artists: parsedArtists, // Use the structured array
-                        albumName: '', // API doesn't seem to provide this
-                        spotifyId: apiSong.spotify_id || '',
-                        youtubeId: '', // API doesn't seem to provide this
-                        // genre: [], // DO NOT initialize here - preserve existing!
-                        albumArt: apiSong.spotify_image || '',
-                        previewUrl: null // API doesn't seem to provide this
+                        id: String(apiSong.id || `unknown-${Date.now()}`),
+                        songName: String(apiSong.title || 'Unknown Song'),
+                        artists: parsedArtists,
+                        albumName: String(apiSong.album || ''),
+                        spotifyId: String(apiSong.spotify_id || ''),
+                        youtubeId: String(apiSong.youtube_id || ''),
+                        genre: [], // Initialize empty array, will be populated by genre service
+                        albumArt: String(apiSong.spotify_image || ''),
+                        previewUrl: apiSong.preview_url || null
                     };
                     newSongsFromApi.push(normalizedSong);
                 }
             }
             // --- Parse songs from API Data - END ---
 
-
             const existingPlayer = await Player.findOne({ id: String(playerData.id) });
 
             if (existingPlayer) {
                 // --- UPDATE EXISTING PLAYER ---
                 const updateData: Partial<PlayerDocument> = {
-                     mlbId: playerData.mlb_id,
-                     name: playerData.name,
-                    // position: playerData.position, // Position often comes from stats API, maybe don't update here?
-                    team: playerData.team?.name || existingPlayer.team, // Preserve if API missing
-                    teamId: String(playerData.team?.id || existingPlayer.teamId), // Preserve if API missing
+                    mlbId: String(playerData.mlb_id),
+                    name: String(playerData.name),
+                    team: String(playerData.team?.name || existingPlayer.team),
+                    teamId: String(playerData.team?.id || existingPlayer.teamId),
                     lastUpdated: new Date()
                 };
 
-                // Prepare existing songs, preserving genres and artists array structure
+                // Prepare existing songs, preserving genres and artists
                 const existingSongsMap = new Map(existingPlayer.walkupSongs.map(s => [s.id, s]));
                 const finalSongList: WalkupSongSubdocument[] = [];
 
-                // Add updated/existing songs first, preserving original genre/artists unless overwritten by new spotifyID
+                // Add updated/existing songs first
                 for (const existingSongDoc of existingPlayer.walkupSongs) {
-                     const songObject: WalkupSongSubdocument = { // Reconstruct explicitly
-                         id: existingSongDoc.id,
-                         songName: existingSongDoc.songName,
-                         artists: existingSongDoc.artists?.map(a => ({ name: a.name, role: a.role })) || [], // Copy array
-                         albumName: existingSongDoc.albumName,
-                         spotifyId: existingSongDoc.spotifyId,
-                         youtubeId: existingSongDoc.youtubeId,
-                         genre: existingSongDoc.genre, // Preserve genre
-                         albumArt: existingSongDoc.albumArt,
-                         previewUrl: existingSongDoc.previewUrl
-                     };
+                    const songObject: WalkupSongSubdocument = {
+                        id: String(existingSongDoc.id),
+                        songName: String(existingSongDoc.songName),
+                        artists: existingSongDoc.artists?.map(a => ({ 
+                            name: String(a.name), 
+                            role: a.role 
+                        })) || [],
+                        albumName: String(existingSongDoc.albumName),
+                        spotifyId: String(existingSongDoc.spotifyId),
+                        youtubeId: String(existingSongDoc.youtubeId),
+                        genre: Array.isArray(existingSongDoc.genre) ? existingSongDoc.genre : [],
+                        albumArt: String(existingSongDoc.albumArt),
+                        previewUrl: existingSongDoc.previewUrl
+                    };
 
-                    // Check if this song ID exists in the *new* API data and has a spotifyId
                     const matchingNewApiSong = newSongsFromApi.find(newSong => newSong.id === songObject.id);
                     if (matchingNewApiSong) {
-                         // Update fields that might change (like spotifyId, albumArt) from the latest API pull
-                         if (matchingNewApiSong.spotifyId && !songObject.spotifyId) { // Only update if missing
-                             songObject.spotifyId = matchingNewApiSong.spotifyId;
-                         }
-                         if (matchingNewApiSong.albumArt) {
-                             songObject.albumArt = matchingNewApiSong.albumArt;
-                         }
-                         // IMPORTANT: Use artists array from API if it's different? Or keep existing?
-                         // Let's keep existing parsed artists for now, assuming they were correct before.
-                         // If API is source of truth, uncomment below:
-                         // songObject.artists = matchingNewApiSong.artists;
-                     }
-                     finalSongList.push(songObject);
+                        if (matchingNewApiSong.spotifyId && !songObject.spotifyId) {
+                            songObject.spotifyId = String(matchingNewApiSong.spotifyId);
+                        }
+                        if (matchingNewApiSong.albumArt) {
+                            songObject.albumArt = String(matchingNewApiSong.albumArt);
+                        }
+                    }
+                    finalSongList.push(songObject);
                 }
 
-                // Add songs from API that weren't in the existing list
+                // Add new songs from API
                 for (const newApiSong of newSongsFromApi) {
                     if (!existingSongsMap.has(newApiSong.id)) {
-                        finalSongList.push(newApiSong); // Add the fully parsed new song
+                        finalSongList.push(newApiSong);
                     }
                 }
 
-                updateData.walkupSongs = finalSongList; // Use the carefully constructed final list
+                updateData.walkupSongs = finalSongList;
 
                 await Player.updateOne({ id: String(playerData.id) }, { $set: updateData });
-                // console.log(`WalkupSongSyncService: Updated player ${playerData.name}`);
                 return 'updated';
 
-             } else {
+            } else {
                 // --- CREATE NEW PLAYER ---
-                console.log(`WalkupSongSyncService: Creating new player ${playerData.name}`);
                 const newPlayer = new Player({
                     id: String(playerData.id),
-                    mlbId: playerData.mlb_id,
-                    name: playerData.name,
-                    position: playerData.position || '', // Default position if needed
-                    team: playerData.team?.name || 'Unknown',
+                    mlbId: String(playerData.mlb_id),
+                    name: String(playerData.name),
+                    position: String(playerData.position || ''),
+                    team: String(playerData.team?.name || 'Unknown'),
                     teamId: String(playerData.team?.id || 'Unknown'),
                     lastUpdated: new Date(),
-                    walkupSongs: newSongsFromApi, // Save the parsed songs
-                    // Initialize stats if needed
+                    walkupSongs: newSongsFromApi,
                     stats: { batting: {}, pitching: {} }
                 });
                 await newPlayer.save();
-                // console.log(`WalkupSongSyncService: Saved new player ${playerData.name}`);
                 return 'created';
             }
         } catch (error) {
